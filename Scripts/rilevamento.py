@@ -3,6 +3,8 @@ import numpy as np
 from pymavlink import mavutil
 import time
 
+import utils 
+
 aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_50)
 detector_params = cv2.aruco.DetectorParameters_create()
 
@@ -51,6 +53,10 @@ while True:
     parameters=detector_params
 )
     if corners:
+        print("Marker 1: ", corners[3])
+        centroide1 = utils.centroide_marker(corners[0][0])
+        centroide2 = utils.centroide_marker(corners[0][0])
+        #cv2.SOLVEPNP_IPPE_SQUARE()
         flag_atterraggio = True
         for corner, marker_id in zip(corners, ids):
             cv2.polylines(
@@ -65,3 +71,4 @@ while True:
         break
 cap.release()
 cv2.destroyAllWindows()
+
