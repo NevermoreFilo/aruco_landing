@@ -10,7 +10,7 @@ detector_params = cv2.aruco.DetectorParameters_create()
 
 # Parametri intrinseci della camera (vanno calibrati - vedi nota sotto)
 #camera_matrix = np.array([[f_x, 0, c_x], [0, f_y, c_y], [0, 0, 1]])
-dist_coeffs = np.zeros((5,1))
+dist_coeffs = np.zeros((5,1)) # coefficenti di distorsione (vanno calibrati - vedi nota sotto)
 marker_size = 0.1  # metri
 h = marker_size / 2
 marker_points = np.array([[-h,  h, 0], # alto sinistra
@@ -96,13 +96,14 @@ pipeline = (
     "! rtph264depay ! avdec_h264 ! videoconvert "
     "! appsink name=appsink sync=false drop=true max-buffers=1"
 )
+#send_target()  # invio il primo target per far partire il drone
 
-send_target()  # invio il primo target per far partire il drone
 cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
 if not cap.isOpened():
     print("Errore: impossibile aprire lo stream video")
     exit(1)
 last_hb = 0
+
 while True:
     coordinate_marker_3 = {} # azzero ad ogni frame
     if time.time() - last_hb >= 1:
@@ -169,24 +170,24 @@ while True:
             err_yaw = wrap(np.arctan2(v[1], v[0]) - ANGOLO_RIF)
 
             yaw_rate = np.clip(KP_YAW * err_yaw, -YAW_RATE_MAX, YAW_RATE_MAX)
-            print(f"err_avanti={err_avanti:.2f} err_destra={err_destra:.2f} "
-                f"err_yaw={np.degrees(err_yaw):.1f}° yaw_rate={yaw_rate:.2f}")
+        #     print(f"err_avanti={err_avanti:.2f} err_destra={err_destra:.2f} "
+        #         f"err_yaw={np.degrees(err_yaw):.1f}° yaw_rate={yaw_rate:.2f}")
 
-            if abs(err_avanti) < TOL and abs(err_destra) < TOL and abs(err_yaw) < TOL_YAW:
-                invia_comando(0, 0, 0)
-                print("Allineato")
-            else:
-                vx = np.clip(KP * err_avanti, -VMAX, VMAX)
-                vy = np.clip(KP * err_destra, -VMAX, VMAX)
-                # se la posizione è già a posto ma lo yaw no, ruota soltanto
-                if abs(err_avanti) < TOL and abs(err_destra) < TOL:
-                    vx = vy = 0
-                if abs(err_yaw) < TOL_YAW:
-                    yaw_rate = 0
-                invia_comando(vx, vy, yaw_rate)
-            ULTIMO_INVIO = time.time()
-        elif not ID_ATTESI_3.issubset(visibili):
-            invia_comando(0, 0, 0)     # marker persi: fermati
+        #     if abs(err_avanti) < TOL and abs(err_destra) < TOL and abs(err_yaw) < TOL_YAW:
+        #         invia_comando(0, 0, 0)
+        #         print("Allineato")
+        #     else:
+        #         vx = np.clip(KP * err_avanti, -VMAX, VMAX)
+        #         vy = np.clip(KP * err_destra, -VMAX, VMAX)
+        #         # se la posizione è già a posto ma lo yaw no, ruota soltanto
+        #         if abs(err_avanti) < TOL and abs(err_destra) < TOL:
+        #             vx = vy = 0
+        #         if abs(err_yaw) < TOL_YAW:
+        #             yaw_rate = 0
+        #         invia_comando(vx, vy, yaw_rate)
+        #     ULTIMO_INVIO = time.time()
+        # elif not ID_ATTESI_3.issubset(visibili):
+        #     invia_comando(0, 0, 0)     # marker persi: fermati
 
     cv2.imshow("Drone Camera", frame)
 
