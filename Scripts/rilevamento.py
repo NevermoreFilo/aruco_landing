@@ -129,7 +129,7 @@ while True:
                             [0, fx, H / 2],
                             [0,  0,   1]], dtype=np.float64)
     dist_coeffs = np.zeros((5, 1))             # in gazebo la camera è ideale quindi non c'è distorsione
-    
+    #cv2.aruco.drawDetectedMarkers(frame, rejected, borderColor=(0, 0, 255))
     if corners:
         for i, corner in enumerate(corners):
             pts = corner[0]
