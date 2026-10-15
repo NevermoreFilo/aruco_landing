@@ -164,12 +164,12 @@ while True:
             err_avanti = -cy
             err_destra = cx
             p = coordinate_marker_3
-            v1 = np.array(p[7]) - np.array(p[6])
+            v1 = np.array(p[7]) - np.array(p[6]) #
             v2 = np.array(p[9]) - np.array(p[8])        # coppia parallela, per ridurre il rumore
             v = v1 + v2
             err_yaw = wrap(np.arctan2(v[1], v[0]) - ANGOLO_RIF)
 
-            yaw_rate = np.clip(KP_YAW * err_yaw, -YAW_RATE_MAX, YAW_RATE_MAX)
+            yaw_rate = np.clip(KP_YAW * err_yaw, -YAW_RATE_MAX, YAW_RATE_MAX) 
         #     print(f"err_avanti={err_avanti:.2f} err_destra={err_destra:.2f} "
         #         f"err_yaw={np.degrees(err_yaw):.1f}° yaw_rate={yaw_rate:.2f}")
 
