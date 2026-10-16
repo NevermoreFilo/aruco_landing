@@ -32,6 +32,7 @@ def missione():
         inizializzatore.movimento_drone() 
         aruco_lander.avvicinamento_zona_stazione() # avvicinamento alla zona della stazione di atterraggio
         aruco_lander.fase_1()
+        aruco_lander.fase_2()
     except Exception as e:
         print("Errore nella missione:", e)
         stop.set()

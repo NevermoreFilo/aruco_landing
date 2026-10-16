@@ -66,19 +66,26 @@ class ArucoLanding:
         self.ZONA_STAZIONE = [4, 20, -15] # la z viene messa a 15 metri 
         # Nota: le coordinate in Gazebo usano il sistema di riferimento NED (North-East-Down), mentre MAVLink usa il sistema di riferimento ENU (East-North-Up)
 
-        self.ID_ATTESI_1 = {0} # marker da riconoscere nella terza fase
-        self.ID_ATTESI_2 = {2, 3, 4, 5} # marker da riconoscere nella terza fase
-        self.ID_ATTESI_3 = {6, 7, 8, 9} # marker da riconoscere nella terza fase
+        self.ID_ATTESI_1 = {0} # marker da riconoscere nella prima fase
+        self.ID_ATTESI_2 = [1, 2, 3, 4] # marker da riconoscere nella seconda fase
+        self.ID_ATTESI_3 = [5, 6, 7, 8] # marker da riconoscere nella terza fase
 
-        self.KP_1 = 0.5 #m/s
-        self.VMAX_1 = 0.5# m/s
-        self.KP_YAW = 0.5        # velocità di correzzione (1/s)
-        self.YAW_RATE_MAX = 0.5 # rad/s (circa 30°/s)
+        self.KP_1 = 0.8 #m/s, proportional gain
+        self.VMAX_1 = 0.5 # m/s
+        self.ANGOLO_CALIBRAZIONE_YAW_1 = 0            # angolo tra due spigoli di un marker quando questo è allineato con la camera 
+        self.TOL_YAW_1 = np.radians(10) # tolleranza errore nello yaw
+        self.TOL_POS_1 = 0.5 # tolleranza nell'errore di x/y per la fase 1
+
+        self.KP_2 = 0.5 #m/s
+        self.VMAX_2 = 0.5 # m/s
+        self.ANGOLO_CALIBRAZIONE_YAW_2 = 0  # angolo
+        self.TOL_YAW_2 = np.radians(3) # tolleranza errore nello yaw
+        self.TOL_POS_2 = 0.05 # tolleranza nell'errore di x/y per la fase 2
 
         self.ERRORE_ALLINEAMENTO_3 = 0.05 # m, soglia di allineamento
-        self.ANGOLO_CALIBRAZIONE_YAW = 0            # angolo tra due spigoli di un marker quando questo è allineato con la camera 
-        self.TOL_YAW = np.radians(10) # tolleranza errore nello yaw
-        self.TOL_POS_1 = 0.5 # tolleranza nell'errore di x/y per la fase 1
+
+        self.KP_YAW = 0.5        # velocità di correzzione (1/s)
+        self.YAW_RATE_MAX = 1        # rad/s 
 
         # Variabili globali
 
@@ -232,13 +239,13 @@ class ArucoLanding:
         0, 0, 0,
         0, yaw_rate)                 # yaw ignorato, yaw_rate usato
 
+        
+
 
 # Funzione ausiliaria che porta il drone ad una determinata quota, mantenendolo fermo sulle altre coordinate
     def discesa_drone(self, quota):
         x, y, _ = self.get_local_pos()
         yaw = self.stato['ATTITUDE'].yaw     
-        att = self.master.recv_match(type='ATTITUDE', blocking=True, timeout=2)
-        yaw = att.yaw
         self.master.mav.set_position_target_local_ned_send(
             0, self.master.target_system, self.master.target_component,
             mavutil.mavlink.MAV_FRAME_LOCAL_NED,
@@ -248,18 +255,16 @@ class ArucoLanding:
             0, 0, 0,
             yaw, 0)
         
-    def attendi_quota(self, quota):
-        alt=0 
-        while True:
-            while (m := self.master.recv_match(blocking=False)):
-                t = m.get_type()
-                if t == 'GLOBAL_POSITION_INT':
-                    alt = m.relative_alt / 1000
-            if alt >=  (-quota) * 0.95: # quota è negativa in NED
+    def attendi_quota(self, quota, tol=0.15, timeout=30):
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            self.aggiorna_stato()
+            m = self.stato.get('LOCAL_POSITION_NED')
+            if m is not None and abs(m.z - quota) < tol:
                 print("Altitudine target raggiunta")
-                break
-            time.sleep(0.1) # per evitare di saturare la CPU con un loop troppo veloce
-
+                return
+            time.sleep(0.1)
+        print("Timeout: quota non raggiunta")
 
 # Funzione per la gestione della fase 1: allineamento grossolano e prima discesa di quota
     def fase_1(self):
@@ -271,35 +276,76 @@ class ArucoLanding:
                 time.sleep(0.1)
                 continue
 
-            print("Allineamento")
-            err_yaw = utils.wrap(d['angolo'] - self.ANGOLO_CALIBRAZIONE_YAW)                         
+            print("Allineamento fase 1")
+            err_yaw = utils.wrap(d['angolo'] - self.ANGOLO_CALIBRAZIONE_YAW_1)                         
             tvec = d['tvec']
-            c, s = np.cos(err_yaw), np.sin(err_yaw)
             # offset nel sistema marker: (ox_dx, ox_av) = (destra, avanti)
             offset_destra = self.ox_dx
             offset_avanti = self.ox_av
             err_destra = tvec[0] - offset_destra
             err_avanti = -tvec[1] - offset_avanti
 
+            yaw_ok = abs(err_yaw) < self.TOL_YAW_1
             # se tutti i parametri sono nella soglia di tolleranza, sono allineato
-            if abs (err_avanti) < self.TOL_POS_1 and abs(err_destra) < self.TOL_POS_1 and abs(err_yaw) < self.TOL_YAW:
+            if abs (err_avanti) < self.TOL_POS_1 and abs(err_destra) < self.TOL_POS_1 and yaw_ok:
                 print("Primo allineamento completato, discesa...")
                 self.discesa_drone(-5)                    # scendo a 5m per la fase 2
                 self.attendi_quota(-5)
                 print("Fase 1 completata")
                 return
-            else :
+            else:
                 vx = np.clip(self.KP_1 * err_avanti, -self.VMAX_1, self.VMAX_1)
                 vy = np.clip(self.KP_1 * err_destra, -self.VMAX_1, self.VMAX_1)
                 yaw_rate = np.clip(self.KP_YAW * err_yaw, -self.YAW_RATE_MAX, self.YAW_RATE_MAX)
                 # se la posizione è giusta ma lo yaw no, allineo e basta
-                if abs(err_avanti) < self.TOL_POS_1 and abs(err_destra) < self.TOL_POS_1:
+                if not yaw_ok:
                     vx = vy = 0
-                # Viceversa
-                if abs(err_yaw) < self.TOL_YAW:
+                else:
                     yaw_rate = 0
             self.allinea_drone_singolo_marker(vx,vy,yaw_rate)
             self.aggiorna_stato()
             time.sleep(0.1)                       # 10 Hz
 
+    # Funzione per la gestione della fase 2: allineamento più preciso ed ultima discesa di quota prima dell'atterraggio
+    def fase_2(self):
+        ids = self.ID_ATTESI_2
+        while True:
+            with self.lock:
+                snap = dict(self.marker_individuati)
+            ora = time.time()
+            if not all(i in snap and ora - snap[i]['t'] < 0.5 for i in ids):
+                self.allinea_drone_singolo_marker(0,0,0)             # marker perso: fermo
+                time.sleep(0.1)
+                continue
+
+            p = {i: np.array(snap[i]['tvec']) for i in ids}   
+            cx, cy, cz = np.mean([p[i] for i in ids], axis=0) # centro stimato
+            print("Allineamento fase 2")
+            # Coppia parallela
+            v = (p[1] - p[3]) + (p[2] - p[4])
+
+            err_destra = cx
+            err_avanti = -cy
+            err_yaw = utils.wrap(np.arctan2(v[1], v[0]) - self.ANGOLO_CALIBRAZIONE_YAW_2)                        
+
+            # se tutti i parametri sono nella soglia di tolleranza, sono allineato
+            if abs (err_avanti) < self.TOL_POS_2 and abs(err_destra) < self.TOL_POS_2 and abs(err_yaw) < self.TOL_YAW_2:
+                print("Secondo allineamento completato, discesa...")
+                self.discesa_drone(-0.8)                    # scendo a 0.8m per la fase 3
+                self.attendi_quota(-0.8)
+                print("Fase 2 completata")
+                return
+            else :
+                vx = np.clip(self.KP_2 * err_avanti, -self.VMAX_2, self.VMAX_2)
+                vy = np.clip(self.KP_2 * err_destra, -self.VMAX_2, self.VMAX_2)
+                yaw_rate = np.clip(self.KP_YAW * err_yaw, -self.YAW_RATE_MAX, self.YAW_RATE_MAX)
+                # se la posizione è giusta ma lo yaw no, allineo e basta
+                if abs(err_avanti) < self.TOL_POS_2 and abs(err_destra) < self.TOL_POS_2:
+                    vx = vy = 0
+                # Viceversa
+                if abs(err_yaw) < self.TOL_YAW_2:
+                    yaw_rate = 0
+            self.allinea_drone_singolo_marker(vx,vy,yaw_rate)
+            self.aggiorna_stato()
+            time.sleep(0.1)                       # 10 Hz
 
