@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <sdf version="1.9">
-  <model name="arucotag">
+  <model name="arucotag2_3">
     <static>true</static>
 
     <link name="arucotag_link">
@@ -9,7 +9,7 @@
   <geometry>
     <plane>
       <normal>0 0 1</normal>
-      <size>1 1</size>
+      <size>0.1 0.1</size>
     </plane>
   </geometry>
 
@@ -19,7 +19,7 @@
   <specular>0.1 0.1 0.1 1</specular>
   <pbr>
     <metal>
-      <albedo_map>/home/cross/gz_ws/src/ardupilot_gazebo/models/arucotag_2/arucotag_2_3/arucotag_2_3.png</albedo_map>
+      <albedo_map>/home/fassetta/gz_ws/src/ardupilot_gazebo/models/arucotag_2/arucotag_2_3/arucotag_2_3.png</albedo_map>
       <metalness>0.0</metalness>
       <roughness>1.0</roughness>
     </metal>
