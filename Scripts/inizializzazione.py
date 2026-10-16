@@ -87,24 +87,24 @@ class Inizializzazione():
             100000, 0, 0, 0, 0, 0
         )
 
-        # 5. Movimento verso la posizione target da cui iniziare la simulazione
-        self.master.mav.set_position_target_local_ned_send(
-            0,
-            self.master.target_system,
-            self.master.target_component,
-            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-            0b110111111000,              # posizione
-            self.COORDINATE_INIZIALI[0], self.COORDINATE_INIZIALI[1], self.COORDINATE_INIZIALI[2],  # x, y, z
-            0, 0, 0,
-            0, 0, 0,
-            0, 0
-        )
+        # # 5. Movimento verso la posizione target da cui iniziare la simulazione
+        # self.master.mav.set_position_target_local_ned_send(
+        #     0,
+        #     self.master.target_system,
+        #     self.master.target_component,
+        #     mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+        #     0b110111111000,              # posizione
+        #     self.COORDINATE_INIZIALI[0], self.COORDINATE_INIZIALI[1], self.COORDINATE_INIZIALI[2],  # x, y, z
+        #     0, 0, 0,
+        #     0, 0, 0,
+        #     0, 0
+        # )
 
-        while True:
-            msg = self.master.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=1) # attendo il messaggio di posizione locale
-            dist = ((msg.x - self.COORDINATE_INIZIALI[0])**2 +
-                    (msg.y - self.COORDINATE_INIZIALI[1])**2 +
-                    (msg.z - self.COORDINATE_INIZIALI[2])**2) ** 0.5
-            if(dist < 1): # se la distanza dalla posizione target è inferiore a 1 metro, esco dal loop
-                print("Posizione target raggiunta")
-                break
+        # while True:
+        #     msg = self.master.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=1) # attendo il messaggio di posizione locale
+        #     dist = ((msg.x - self.COORDINATE_INIZIALI[0])**2 +
+        #             (msg.y - self.COORDINATE_INIZIALI[1])**2 +
+        #             (msg.z - self.COORDINATE_INIZIALI[2])**2) ** 0.5
+        #     if(dist < 1): # se la distanza dalla posizione target è inferiore a 1 metro, esco dal loop
+        #         print("Posizione target raggiunta")
+        #         break

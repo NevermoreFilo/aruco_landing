@@ -1,5 +1,6 @@
 from doctest import master
 import math
+import threading
 import cv2
 import numpy as np
 from pymavlink import mavutil
@@ -22,6 +23,7 @@ class ArucoLanding:
         # Creazione del dizionario ArUco e dei parametri del rilevatore
         self.aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_50)
         self.detector_params = cv2.aruco.DetectorParameters_create()
+
         self.marker_size_1 = 1  # metri
         self.marker_size_2 = 0.4  # metri
         self.marker_size_3 = 0.1  # metri
@@ -46,7 +48,10 @@ class ArucoLanding:
                                          [ h3,  h3, 0],  # alto destra ...
                                          [ h3, -h3, 0],
                                          [-h3, -h3, 0]], dtype=np.float32)
-        self.coordinate_marker_1 = []   # coordinate [x, y, z] del marker 0
+        # Di quanto si scosta il primo marker rispetto la stazione
+        self.ox_dx = 0
+        self.ox_av = 1.5
+
         self.coordinate_marker_2 = {}   # dizionario {id: [x, y, z]}
         self.coordinate_marker_3 = {}   # dizionario {id: [x, y, z]}
         self.flag_atterraggio = False
@@ -58,40 +63,62 @@ class ArucoLanding:
         # Altre costanti 
 
         # coordinate (grossolane) della zona della stazione di atterraggio (in metri)
-        self.ZONA_STAZIONE = [4, 20, -15] # la z viene messa a 5 metri 
+        self.ZONA_STAZIONE = [4, 20, -15] # la z viene messa a 15 metri 
         # Nota: le coordinate in Gazebo usano il sistema di riferimento NED (North-East-Down), mentre MAVLink usa il sistema di riferimento ENU (East-North-Up)
 
         self.ID_ATTESI_1 = {0} # marker da riconoscere nella terza fase
         self.ID_ATTESI_2 = {2, 3, 4, 5} # marker da riconoscere nella terza fase
         self.ID_ATTESI_3 = {6, 7, 8, 9} # marker da riconoscere nella terza fase
 
+        self.KP_1 = 0.5 #m/s
+        self.VMAX_1 = 0.5# m/s
         self.KP_YAW = 0.5        # velocità di correzzione (1/s)
         self.YAW_RATE_MAX = 0.5 # rad/s (circa 30°/s)
 
         self.ERRORE_ALLINEAMENTO_3 = 0.05 # m, soglia di allineamento
-        self.ANGOLO_CALIBRAZIONE_YAW = 2*np.pi            # angolo tra due spigoli di un marker quando questo è allineato con la camera 
-        self.TOL_YAW = np.radians(1)
-
+        self.ANGOLO_CALIBRAZIONE_YAW = 0            # angolo tra due spigoli di un marker quando questo è allineato con la camera 
+        self.TOL_YAW = np.radians(10) # tolleranza errore nello yaw
+        self.TOL_POS_1 = 0.5 # tolleranza nell'errore di x/y per la fase 1
 
         # Variabili globali
 
-        self.coordinate_marker_1 = []   # coordinate globali conosciute per dare una prima direzione
-        self.coordinate_marker_2 = {}   # dizionario {id: [x, y, z]}
-        self.coordinate_marker_3 = {}   # dizionario {id: [x, y, z]}
+        self.lock = threading.Lock()    # lock per marker_individuati
+        self.marker_individuati = {}    # {id: dict(tvec=..., err_yaw=..., t=...)}
 
         self.flag_atterraggio = False
-        self.flag_calibrazione = False
-        
+        self.stato = {} # mantiene lo stato dei messaggi (viene usato poi per svuotare il buffer)
 
-    def get_local_pos(self,timeout=2):
-        m = self.master.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=timeout)
-        if m is None:
-            raise TimeoutError("Nessun LOCAL_POSITION_NED ricevuto")
-        return m.x, m.y, m.z
 
+    def punti_per_id(self, mid):
+        match mid:
+            case 0:
+                return self.marker_points_1
+            case 1 | 2 | 3 | 4:
+                return self.marker_points_2
+            case 5 | 6 | 7 | 8:
+                return self.marker_points_3
+            case _: 
+                return None 
+
+    # Svuota il buffer, tenendo l'ultimo messaggio di ogni tipo
+    def aggiorna_stato(self):
+        while (m := self.master.recv_match(type=['LOCAL_POSITION_NED', 'ATTITUDE',
+                                                'GLOBAL_POSITION_INT'], blocking=False)):
+            self.stato[m.get_type()] = m
+
+    def get_local_pos(self, timeout=2):
+        t0 = time.time()
+        while True:
+            self.aggiorna_stato()
+            m = self.stato.get('LOCAL_POSITION_NED')
+            if m is not None:
+                return m.x, m.y, m.z
+            if time.time() - t0 > timeout:
+                raise TimeoutError("Nessun LOCAL_POSITION_NED ricevuto")
+            time.sleep(0.02)
 
     # Funzione per avvicinarsi alla generale zona della stazione di atterraggio
-    def avvicinamento_zona_stazione(self): # @TODO: mettere un controllo che si sia arrivati in zona e switchare il flag
+    def avvicinamento_zona_stazione(self): 
         print("Avvicinamento alla zona della stazione di atterraggio...")
         _,_,z = self.get_local_pos() # prelevo la quota attuale
         if z > self.ZONA_STAZIONE[2]: # se sono più basso della zona della stazione, rimango basso
@@ -110,6 +137,20 @@ class ArucoLanding:
         0, 0, 0,
         0, 0
     )
+        
+        # Attesa fino a quando la zona target è (quasi raggiunta)
+        last_hb = 0
+        alt = 0.0
+        t0 = time.time()
+
+        while True:
+            x,y,z = self.get_local_pos() # prelevo la quota attuale
+            dist = math.sqrt((x-self.ZONA_STAZIONE[0])**2 + (y-self.ZONA_STAZIONE[1])**2 + (z-quota)**2)
+            if dist < 0.5:
+                print("Zona stazione raggiunta")
+                break
+            time.sleep(0.1) # per evitare di saturare la CPU con un loop troppo veloce
+
 
     def avvio_streaming(self, stop_event):
         cap = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)
@@ -142,29 +183,25 @@ class ArucoLanding:
             self.aruco_dict,
             parameters=self.detector_params
             )
-            if ids is not None and self.flag_calibrazione:
+            marker_frame_attuale = {}
+            if ids is not None:
                 for corner, marker_id in zip(corners, ids):
                     mid = int(marker_id[0]) # converto l'id del marker in intero
                     cv2.polylines(frame, [corner.astype(np.int32)], True, (0, 255, 255), 3, cv2.LINE_AA)
-
-                    if mid in self.ID_ATTESI_1:
-                        ok, rvec, tvec = cv2.solvePnP(self.marker_points_1, corner[0], camera_matrix,
-                                                    dist_coeffs, flags=cv2.SOLVEPNP_IPPE_SQUARE)
-                        print("Debug")
-                        x, y, z = tvec.flatten() # coordinate del marker rispetto alla camera, in metri
-                        self.coordinate_marker_1 = [x, y, z] 
-
-                        dx, dy = corner[0][1] - corner[0][0] 
-                        self.err_yaw_1 = utils.wrap(np.arctan2(dy, dx) - self.ANGOLO_CALIBRAZIONE_YAW)
-                        # Calcolo della velocità di movimento sull'asse yaw
-                        yaw_rate = np.clip(self.KP_YAW * self.err_yaw_1, -self.YAW_RATE_MAX, self.YAW_RATE_MAX) 
-
-                        if abs(self.err_yaw_1) < self.TOL_YAW:
-                            print("Allineato, discesa...")
-                            # @TODO: far scendere di quota (nell'intorno dei 5/8 metri) e passare alla seconda fase di allineamento
-                        else:
-                            self.allinea_drone(yaw_rate)
-
+                    pts = self.punti_per_id(mid) # 
+                    if pts is None:
+                        continue
+                    ok, rvec, tvec = cv2.solvePnP(pts, corner[0], camera_matrix, dist_coeffs,
+                                                flags=cv2.SOLVEPNP_IPPE_SQUARE)
+                    if not ok:
+                        continue
+                    dx, dy = corner[0][1] - corner[0][0]
+                    marker_frame_attuale[mid] = dict(tvec=tvec.flatten(),
+                                    angolo=np.arctan2(dy, dx),
+                                    t=time.time())
+            with self.lock:
+                self.marker_individuati = marker_frame_attuale              # sostituisce: se non vede nulla, resta vuoto
+            
             cv2.imshow("Drone Camera", frame)
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
@@ -184,12 +221,85 @@ class ArucoLanding:
         #     set_param('SIM_GPS1_GLTCH_Y', dlon)
 
 
-    def allinea_drone(self, yaw_rate):
+# Funzione che riposiziona il drone (x/y) 
+    def allinea_drone_singolo_marker(self, vx, vy, yaw_rate):
         self.master.mav.set_position_target_local_ned_send(
         0, self.master.target_system, self.master.target_component,
         mavutil.mavlink.MAV_FRAME_BODY_NED,
         0b0000011111000111,          # velocità + yaw_rate
         0, 0, 0,
-        0, 0, 0,
+        vx, vy, 0,
         0, 0, 0,
         0, yaw_rate)                 # yaw ignorato, yaw_rate usato
+
+
+# Funzione ausiliaria che porta il drone ad una determinata quota, mantenendolo fermo sulle altre coordinate
+    def discesa_drone(self, quota):
+        x, y, _ = self.get_local_pos()
+        yaw = self.stato['ATTITUDE'].yaw     
+        att = self.master.recv_match(type='ATTITUDE', blocking=True, timeout=2)
+        yaw = att.yaw
+        self.master.mav.set_position_target_local_ned_send(
+            0, self.master.target_system, self.master.target_component,
+            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            0b100111111000,          # posizione + yaw (yaw_rate ignorato)
+            x, y, quota,
+            0, 0, 0,
+            0, 0, 0,
+            yaw, 0)
+        
+    def attendi_quota(self, quota):
+        alt=0 
+        while True:
+            while (m := self.master.recv_match(blocking=False)):
+                t = m.get_type()
+                if t == 'GLOBAL_POSITION_INT':
+                    alt = m.relative_alt / 1000
+            if alt >=  (-quota) * 0.95: # quota è negativa in NED
+                print("Altitudine target raggiunta")
+                break
+            time.sleep(0.1) # per evitare di saturare la CPU con un loop troppo veloce
+
+
+# Funzione per la gestione della fase 1: allineamento grossolano e prima discesa di quota
+    def fase_1(self):
+        while True:
+            with self.lock:
+                d = self.marker_individuati.get(0)
+            if d is None or time.time() - d['t'] > 0.5:
+                self.allinea_drone_singolo_marker(0,0,0)             # marker perso: fermo
+                time.sleep(0.1)
+                continue
+
+            print("Allineamento")
+            err_yaw = utils.wrap(d['angolo'] - self.ANGOLO_CALIBRAZIONE_YAW)                         
+            tvec = d['tvec']
+            c, s = np.cos(err_yaw), np.sin(err_yaw)
+            # offset nel sistema marker: (ox_dx, ox_av) = (destra, avanti)
+            offset_destra = self.ox_dx
+            offset_avanti = self.ox_av
+            err_destra = tvec[0] - offset_destra
+            err_avanti = -tvec[1] - offset_avanti
+
+            # se tutti i parametri sono nella soglia di tolleranza, sono allineato
+            if abs (err_avanti) < self.TOL_POS_1 and abs(err_destra) < self.TOL_POS_1 and abs(err_yaw) < self.TOL_YAW:
+                print("Primo allineamento completato, discesa...")
+                self.discesa_drone(-5)                    # scendo a 5m per la fase 2
+                self.attendi_quota(-5)
+                print("Fase 1 completata")
+                return
+            else :
+                vx = np.clip(self.KP_1 * err_avanti, -self.VMAX_1, self.VMAX_1)
+                vy = np.clip(self.KP_1 * err_destra, -self.VMAX_1, self.VMAX_1)
+                yaw_rate = np.clip(self.KP_YAW * err_yaw, -self.YAW_RATE_MAX, self.YAW_RATE_MAX)
+                # se la posizione è giusta ma lo yaw no, allineo e basta
+                if abs(err_avanti) < self.TOL_POS_1 and abs(err_destra) < self.TOL_POS_1:
+                    vx = vy = 0
+                # Viceversa
+                if abs(err_yaw) < self.TOL_YAW:
+                    yaw_rate = 0
+            self.allinea_drone_singolo_marker(vx,vy,yaw_rate)
+            self.aggiorna_stato()
+            time.sleep(0.1)                       # 10 Hz
+
+
