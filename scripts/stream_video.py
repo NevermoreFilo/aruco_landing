@@ -1,0 +1,90 @@
+import threading
+import time
+import cv2
+import numpy as np
+
+class StreamVideo:
+    def __init__(self):
+        self.pipeline = (
+            "udpsrc port=5600 caps=application/x-rtp,media=video,clock-rate=90000,encoding-name=H264 "
+            "! rtph264depay ! avdec_h264 ! videoconvert "
+            "! appsink name=appsink sync=false drop=true max-buffers=1"
+        )
+        self.aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_50)
+        self.detector_params = cv2.aruco.DetectorParameters_create()
+        self.dist_coeffs = np.zeros((5, 1))
+        self.HFOV = 1.047
+
+        def quadrato(lato):
+            h = lato / 2
+            return np.array([[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]], dtype=np.float32)
+
+        self.marker_points_1 = quadrato(1.0)    # ID 0
+        self.marker_points_2 = quadrato(0.4)    # ID 1-4
+        self.marker_points_3 = quadrato(0.1)    # ID 5-8
+
+        self._lock = threading.Lock()
+        self._marker = {}                        # {id: dict(tvec, angolo, t)}
+
+    def punti_per_id(self, mid):
+        if mid == 0:
+            return self.marker_points_1
+        if mid in (1, 2, 3, 4):
+            return self.marker_points_2
+        if mid in (5, 6, 7, 8):
+            return self.marker_points_3
+        return None
+
+    # Funzione per la copia dei marker dell'ultimo frame, sicura da qualsiasi thread
+    def snapshot(self):
+        with self._lock:
+            return dict(self._marker)
+
+    def avvio_streaming(self, stop_event):
+        cap = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)
+        if not cap.isOpened():
+            print("Errore: impossibile aprire lo stream video")
+            stop_event.set()
+            return
+
+        frame = None
+        while frame is None and not stop_event.is_set():
+            ret, f = cap.read()
+            if ret:
+                frame = f
+        if frame is None:
+            return
+
+        H, W = frame.shape[:2]
+        fx = (W / 2) / np.tan(self.HFOV / 2)
+        camera_matrix = np.array([[fx, 0, W / 2], [0, fx, H / 2], [0, 0, 1]], dtype=np.float64)
+
+        while not stop_event.is_set():
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            corners, ids, _ = cv2.aruco.detectMarkers(frame, self.aruco_dict,
+                                                      parameters=self.detector_params)
+            attuali = {}
+            if ids is not None:
+                for corner, marker_id in zip(corners, ids):
+                    mid = int(marker_id[0])
+                    cv2.polylines(frame, [corner.astype(np.int32)], True, (0, 255, 255), 3, cv2.LINE_AA)
+                    pts = self.punti_per_id(mid)
+                    if pts is None:
+                        continue
+                    ok, rvec, tvec = cv2.solvePnP(pts, corner[0], camera_matrix, self.dist_coeffs,
+                                                  flags=cv2.SOLVEPNP_IPPE_SQUARE)
+                    if not ok:
+                        continue
+                    dx, dy = corner[0][1] - corner[0][0]
+                    attuali[mid] = dict(tvec=tvec.flatten(), angolo=np.arctan2(dy, dx), t=time.time())
+            with self._lock:
+                self._marker = attuali
+
+            cv2.imshow("Drone Camera", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                stop_event.set()
+                break
+        cap.release()
+        cv2.destroyAllWindows()

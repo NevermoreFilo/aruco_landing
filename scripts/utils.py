@@ -8,3 +8,9 @@ def centroide_marker(coords):
 
 def wrap(a): # funzione per limitare l'angolo tra -pi e pi
     return (a + np.pi) % (2 * np.pi) - np.pi
+
+# Funzione per ritornare l'errore totale dato dalla differenza tra due coordinate
+def confronta_coordinate(coord1, coord2):
+    err_x = abs(coord1[0] - coord2[0])
+    err_y = abs(coord1[1] - coord2[1])
+    return err_x + err_y 
