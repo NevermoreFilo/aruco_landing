@@ -1,10 +1,10 @@
 from doctest import master
 import math
 import threading
-import cv2
 import numpy as np
 from pymavlink import mavutil
 import time
+import random
 
 import utils
 
@@ -22,30 +22,31 @@ class ArucoLanding:
 
         # Altre costanti 
 
+        self.COORDINATE_ESATTE_STAZIONE = [7, 15] # Mantengo le esatte coordinate della stazione per confrontarle con quelle ottenute all'atterraggio
+
         # coordinate (grossolane) della zona della stazione di atterraggio (in metri)
-        self.ZONA_STAZIONE = [4, 20, -15] # la z viene messa a 15 metri 
+        self.ZONA_STAZIONE = [random.randrange(1, 15, 1), random.randrange(5, 20), -15] # la z viene messa a 15 metri 
         # Nota: le coordinate in Gazebo usano il sistema di riferimento NED (North-East-Down), mentre MAVLink usa il sistema di riferimento ENU (East-North-Up)
         
-        self.COORDINATE_ESATTE_STAZIONE = [7, 15] # Mantengo le esatte coordinate della stazione per confrontarle con quelle ottenute all'atterraggio
 
 
         self.ID_ATTESI_1 = {0} # marker da riconoscere nella prima fase
         self.ID_ATTESI_2 = [1, 2, 3, 4] # marker da riconoscere nella seconda fase
         self.ID_ATTESI_3 = [5, 6, 7, 8] # marker da riconoscere nella terza fase
 
-        self.KP_1 = 0.8 #m/s, proportional gain
+        self.KP_1 = 0.6 #m/s, proportional gain
         self.VMAX_1 = 0.5 # m/s
         self.ANGOLO_CALIBRAZIONE_YAW_1 = 0            # angolo tra due spigoli di un marker quando questo è allineato con la camera 
         self.TOL_YAW_1 = np.radians(10) # tolleranza errore nello yaw
         self.TOL_POS_1 = 0.5 # tolleranza nell'errore di x/y per la fase 1
 
-        self.KP_2 = 0.5 #m/s
-        self.VMAX_2 = 0.5 # m/s
+        self.KP_2 = 0.4 #m/s
+        self.VMAX_2 = 0.4 # m/s
         self.ANGOLO_CALIBRAZIONE_YAW_2 = 0  # angolo
         self.TOL_YAW_2 = np.radians(4) # tolleranza errore nello yaw
         self.TOL_POS_2 = 0.1 # tolleranza nell'errore di x/y per la fase 2
 
-        self.KP_3 = 0.5 #m/s
+        self.KP_3 = 0.3 #m/s
         self.VMAX_3 = 0.3 # m/s
         self.ANGOLO_CALIBRAZIONE_YAW_3 = 0  # angolo
         self.TOL_YAW_3 = np.radians(2) # tolleranza errore nello yaw
@@ -81,7 +82,6 @@ class ArucoLanding:
 
     # Funzione per avvicinarsi alla generale zona della stazione di atterraggio
     def avvicinamento_zona_stazione(self): 
-        print("Avvicinamento alla zona della stazione di atterraggio...")
         _,_,z = self.get_local_pos() # prelevo la quota attuale
         if z > self.ZONA_STAZIONE[2]: # se sono più basso della zona della stazione, rimango basso
             quota = z
@@ -183,6 +183,7 @@ class ArucoLanding:
 # Funzione per la gestione della fase 1: allineamento grossolano e prima discesa di quota
     def fase_1(self):
         print("Allineamento fase 1")
+        t0 = time.time()
         while True:
             d = self.stream.snapshot().get(0)
             if d is None or time.time() - d['t'] > 0.5:
@@ -198,9 +199,11 @@ class ArucoLanding:
             err_destra = tvec[0] - offset_destra
             err_avanti = -tvec[1] - offset_avanti
 
+            x_ok = abs (err_avanti) < self.TOL_POS_1
+            y_ok = abs(err_destra) < self.TOL_POS_1
             yaw_ok = abs(err_yaw) < self.TOL_YAW_1
             # se tutti i parametri sono nella soglia di tolleranza, sono allineato
-            if abs (err_avanti) < self.TOL_POS_1 and abs(err_destra) < self.TOL_POS_1 and yaw_ok:
+            if x_ok and y_ok and yaw_ok:
                 print("Primo allineamento completato, discesa...")
                 self.discesa_drone(-5)                    # scendo a 5m per la fase 2
                 self.attendi_quota(-5)
@@ -215,6 +218,7 @@ class ArucoLanding:
                     vx = vy = 0
                 else:
                     yaw_rate = 0
+                
             self.allinea_drone_singolo_marker(vx,vy,yaw_rate)
             self.aggiorna_stato()
             time.sleep(0.1)                       # 10 Hz

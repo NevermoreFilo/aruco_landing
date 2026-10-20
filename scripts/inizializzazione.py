@@ -31,11 +31,11 @@ class Inizializzazione():
         while not self.master.motors_armed():
             m = self.master.recv_match(type=['HEARTBEAT', 'STATUSTEXT', 'COMMAND_ACK'],
                                 blocking=True, timeout=1)
-            if m is not None:
-                if m.get_type() == 'STATUSTEXT':
-                    print("Autopilot:", m.text)
-                elif m.get_type() == 'COMMAND_ACK':
-                    print("ACK:", m)
+            # if m is not None:
+            #     if m.get_type() == 'STATUSTEXT':
+            #         print("Autopilot:", m.text)
+            #     elif m.get_type() == 'COMMAND_ACK':
+            #         print("ACK:", m)
             if time.time() - t0 > 30:
                 raise RuntimeError("Errore nell'armamento dei motori o timeout")
         print("Motori armati")
@@ -70,7 +70,7 @@ class Inizializzazione():
                 if t == 'GLOBAL_POSITION_INT':
                     alt = m.relative_alt / 1000
 
-            print(f"Altitude: {alt:.1f} m")
+            # print(f"Altitude: {alt:.1f} m")
             if alt >= self.ALTITUDINE_INIZIALE * 0.95:
                 print("Altitudine target raggiunta")
                 break
