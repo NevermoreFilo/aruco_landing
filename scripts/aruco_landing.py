@@ -9,10 +9,10 @@ import random
 import utils
 
 class ArucoLanding:
-    def __init__(self, master, stream, flag_simulazione):
+    def __init__(self, master, stream, stazione):
         self.master = master
         self.stream = stream
-        self.flag_simulazione = flag_simulazione
+
 
         # Di quanto si scosta il primo marker rispetto la stazione
         self.ox_dx = 0
@@ -22,12 +22,14 @@ class ArucoLanding:
 
         # Altre costanti 
 
-        self.COORDINATE_ESATTE_STAZIONE = [7, 15] # Mantengo le esatte coordinate della stazione per confrontarle con quelle ottenute all'atterraggio
-
+        #self.COORDINATE_ESATTE_STAZIONE = [7, 15] # Mantengo le esatte coordinate della stazione per confrontarle con quelle ottenute all'atterraggio
         # coordinate (grossolane) della zona della stazione di atterraggio (in metri)
-        self.ZONA_STAZIONE = [random.randrange(1, 15, 1), random.randrange(5, 20), -15] # la z viene messa a 15 metri 
+        #self.ZONA_STAZIONE = [random.randrange(1, 15, 1), random.randrange(5, 20), -15] # la z viene messa a 15 metri 
         # Nota: le coordinate in Gazebo usano il sistema di riferimento NED (North-East-Down), mentre MAVLink usa il sistema di riferimento ENU (East-North-Up)
         
+        self.ZONA_STAZIONE = [stazione[0], stazione[1], -15]
+
+        self.COORDINATE_ESATTE_STAZIONE = stazione
 
 
         self.ID_ATTESI_1 = {0} # marker da riconoscere nella prima fase
@@ -35,7 +37,7 @@ class ArucoLanding:
         self.ID_ATTESI_3 = [5, 6, 7, 8] # marker da riconoscere nella terza fase
 
         self.KP_1 = 0.6 #m/s, proportional gain
-        self.VMAX_1 = 0.5 # m/s
+        self.VMAX_1 = 0.8 # m/s
         self.ANGOLO_CALIBRAZIONE_YAW_1 = 0            # angolo tra due spigoli di un marker quando questo è allineato con la camera 
         self.TOL_YAW_1 = np.radians(10) # tolleranza errore nello yaw
         self.TOL_POS_1 = 0.5 # tolleranza nell'errore di x/y per la fase 1
@@ -114,11 +116,11 @@ class ArucoLanding:
             time.sleep(0.1) # per evitare di saturare la CPU con un loop troppo veloce
 
 
-        # def set_gps_bias(err_n_m, err_e_m, lat_deg):
-        #     dlat = err_n_m / 111_000.0
-        #     dlon = err_e_m / (111_000.0 * math.cos(math.radians(lat_deg)))
-        #     set_param('SIM_GPS1_GLTCH_X', dlat)   # o SIM_GPS_GLITCH_X nelle versioni vecchie
-        #     set_param('SIM_GPS1_GLTCH_Y', dlon)
+    def set_gps_bias(self, err_n_m, err_e_m, lat_deg):
+        dlat = err_n_m / 111_000.0
+        dlon = err_e_m / (111_000.0 * math.cos(math.radians(lat_deg)))
+        self.set_param('SIM_GPS1_GLTCH_X', dlat)   # o SIM_GPS_GLITCH_X nelle versioni vecchie
+        self.set_param('SIM_GPS1_GLTCH_Y', dlon)
 
 
 # Funzione che riposiziona il drone (x/y) 
@@ -292,12 +294,16 @@ class ArucoLanding:
             # se tutti i parametri sono nella soglia di tolleranza, sono allineato
             if abs (err_avanti) < self.TOL_POS_3 and abs(err_destra) < self.TOL_POS_3 and abs(err_yaw) < self.TOL_YAW_3:
                 print("Terzo allineamento completato, atterraggio...")
-                self.atterraggio_drone()
-                x,y,_ = self.get_local_pos()
-                print("Atterraggio avvenuto alle coordinate x: ", x, " y: ", y, " e con yaw: ", self.stato['ATTITUDE'].yaw)
-                print("Errore nell'atterraggio: ", utils.confronta_coordinate([x,y], self.COORDINATE_ESATTE_STAZIONE))
+                atterrato = self.atterraggio_drone()
+                if (not atterrato):
+                    return(dict(esito="fallito"))
+                x,y = utils.posizione_reale_gazebo()
+                yaw = self.stato['ATTITUDE'].yaw
+                errore = math.hypot(x-self.COORDINATE_ESATTE_STAZIONE[1], y-self.COORDINATE_ESATTE_STAZIONE[0])
+                print("Atterraggio avvenuto alle coordinate x: ", x, " y: ", y, " e con yaw: ", yaw)
+                print("Errore nell'atterraggio: ", errore)
                 print("Fase 3 completata")
-                return
+                return dict(esito="ok", errore=errore, x=x, y=y, yaw=yaw)
             else :
                 vx = np.clip(self.KP_3 * err_avanti, -self.VMAX_3, self.VMAX_3)
                 vy = np.clip(self.KP_3 * err_destra, -self.VMAX_3, self.VMAX_3)

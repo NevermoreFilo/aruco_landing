@@ -2,6 +2,7 @@ import threading
 import time
 import cv2
 import numpy as np
+import subprocess
 
 class StreamVideo:
     def __init__(self):
@@ -14,6 +15,8 @@ class StreamVideo:
         self.detector_params = cv2.aruco.DetectorParameters_create()
         self.dist_coeffs = np.zeros((5, 1))
         self.HFOV = 1.047
+        self.TOPIC = ("/world/iris_runway/model/iris_with_gimbal/model/gimbal/link/"
+         "pitch_link/sensor/camera/image/enable_streaming")
 
         def quadrato(lato):
             h = lato / 2
@@ -40,9 +43,30 @@ class StreamVideo:
         with self._lock:
             return dict(self._marker)
 
+
+    def abilita_streaming(self):
+        # pubblica soltanto: se il topic non esiste ancora il messaggio va perso e si riprova
+        try:
+            subprocess.run(["gz", "topic", "-t", self.TOPIC, "-m", "gz.msgs.Boolean", "-p", "data: 1"],
+                        capture_output=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+
+    # Riprova ad aprire la pipeline fino a quando non arrivano dati
+    def apri_cattura(self, stop_event, timeout=90):
+        t0 = time.time()
+        while time.time() - t0 < timeout and not stop_event.is_set():
+            self.abilita_streaming()
+            cap = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)
+            if cap.isOpened():
+                return cap
+            cap.release()
+            time.sleep(2)
+        return None
+
     def avvio_streaming(self, stop_event):
-        cap = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)
-        if not cap.isOpened():
+        cap = self.apri_cattura(stop_event)
+        if cap is None:
             print("Errore: impossibile aprire lo stream video")
             stop_event.set()
             return
@@ -53,8 +77,8 @@ class StreamVideo:
             if ret:
                 frame = f
         if frame is None:
+            cap.release()
             return
-
         H, W = frame.shape[:2]
         fx = (W / 2) / np.tan(self.HFOV / 2)
         camera_matrix = np.array([[fx, 0, W / 2], [0, fx, H / 2], [0, 0, 1]], dtype=np.float64)
