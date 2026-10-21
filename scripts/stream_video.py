@@ -45,37 +45,41 @@ class StreamVideo:
 
 
     def abilita_streaming(self):
-        # pubblica soltanto: se il topic non esiste ancora il messaggio va perso e si riprova
-        try:
-            subprocess.run(["gz", "topic", "-t", self.TOPIC, "-m", "gz.msgs.Boolean", "-p", "data: 1"],
-                        capture_output=True, timeout=10)
-        except subprocess.TimeoutExpired:
-            pass
+        r = subprocess.run(["gz", "topic", "-t", self.TOPIC, "-m", "gz.msgs.Boolean", "-p", "data: 1"], # comando che altrimenti lancerei da terminale
+                        capture_output=True, text=True, timeout=10)
+        if r.returncode != 0 or r.stderr:
+            print("gz topic:", r.returncode, r.stderr.strip())
 
-    # Riprova ad aprire la pipeline fino a quando non arrivano dati
-    def apri_cattura(self, stop_event, timeout=90):
-        t0 = time.time()
-        while time.time() - t0 < timeout and not stop_event.is_set():
-            self.abilita_streaming()
-            cap = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)
-            if cap.isOpened():
-                return cap
-            cap.release()
-            time.sleep(2)
-        return None
+    # Funzione che continua a provare a pubblicare il topic finché lo stream non parte
+    def _richiedi_stream(self, stop_event, frame_arrivato): 
+        while not stop_event.is_set() and not frame_arrivato.is_set():
+            try:
+                self.abilita_streaming()
+            except subprocess.TimeoutExpired:
+                pass
+            frame_arrivato.wait(3)          # riprova ogni 3s finché non arriva un frame
 
-    def avvio_streaming(self, stop_event):
-        cap = self.apri_cattura(stop_event)
-        if cap is None:
+    def avvio_streaming(self, stop_event, timeout=90):
+        cap = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)   
+        if not cap.isOpened():
             print("Errore: impossibile aprire lo stream video")
             stop_event.set()
             return
 
+        frame_arrivato = threading.Event()
+        threading.Thread(target=self._richiedi_stream, args=(stop_event, frame_arrivato),
+                        daemon=True).start()
+
         frame = None
+        t0 = time.time()
         while frame is None and not stop_event.is_set():
             ret, f = cap.read()
             if ret:
                 frame = f
+                frame_arrivato.set()
+            elif time.time() - t0 > timeout:
+                print("Errore: nessun frame ricevuto")
+                stop_event.set()
         if frame is None:
             cap.release()
             return
