@@ -11,8 +11,17 @@ class StreamVideo:
             "! rtph264depay ! avdec_h264 ! videoconvert "
             "! appsink name=appsink sync=false drop=true max-buffers=1"
         )
-        self.aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_50)
-        self.detector_params = cv2.aruco.DetectorParameters_create()
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(
+            cv2.aruco.DICT_4X4_50
+        )
+
+        self.detector_params = cv2.aruco.DetectorParameters()
+
+        self.detector = cv2.aruco.ArucoDetector(
+            self.aruco_dict,
+            self.detector_params
+        )
+
         self.dist_coeffs = np.zeros((5, 1))
         self.HFOV = 1.047
         self.TOPIC = ("/world/iris_runway/model/iris_with_gimbal/model/gimbal/link/"
@@ -117,8 +126,8 @@ class StreamVideo:
             ret, frame = cap.read()
             if not ret:
                 continue
-            corners, ids, _ = cv2.aruco.detectMarkers(frame, self.aruco_dict,
-                                                      parameters=self.detector_params)
+            corners, ids, _ = self.detector.detectMarkers(frame)
+
             attuali = {}
             if ids is not None:
                 for corner, marker_id in zip(corners, ids):
