@@ -7,7 +7,6 @@ from pymavlink import mavutil
 import csv
 
 ARDUPILOT_DIR = os.path.expanduser("~/ardupilot/Tools/autotest")   # adatta
-PARM = os.path.expanduser("~/gz_ws/src/ardupilot_gazebo/config/gazebo-iris-gimbal.parm")
 LIVELLI_SIGMA = [0, 0.5, 1, 2, 3]
 RIPETIZIONI = 10
 CSV_OUT = "risultati.csv"
@@ -19,22 +18,30 @@ def crea_ambiente_simulazione():
     procs.append(subprocess.Popen(
         ["gz", "sim", "-v4", "-r", "iris_runway.sdf"],
         preexec_fn=os.setsid, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-    time.sleep(10)
     procs.append(subprocess.Popen(
-        ["./sim_vehicle.py", "-D", "-v", "ArduCopter", "-f", "JSON", "-w", "--daemon",
-         f"--add-param-file={PARM}"],
+        ["./sim_vehicle.py", "-v", "ArduCopter", "-f", "JSON", "-w", "--no-rebuild",
+        "--out=127.0.0.1:14550"],
+        stdin=subprocess.PIPE,
         cwd=ARDUPILOT_DIR, preexec_fn=os.setsid,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
     return procs
 
 def distruggi_ambiente_simulazione(processi):
     for p in reversed(processi): # reversed per chiudere prima SITL di gazebo
-        try: os.killpg(os.getpgid(p.pid), signal.SIGTERM) # invio un segnale di terminazione all'ambiente
-        except ProcessLookupError: pass
+        try: 
+            os.killpg(os.getpgid(p.pid), signal.SIGTERM) # invio un segnale di terminazione all'ambiente
+        except ProcessLookupError: 
+            pass
     time.sleep(3)
     for p in processi:
-        try: os.killpg(os.getpgid(p.pid), signal.SIGKILL) # se qualcuno non è terminato, lo distruggo forzatamente
-        except ProcessLookupError: pass
+        try:
+            p.wait(timeout=5) # do qualche secondo di tempo al processo per terminare
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(p.pid), signal.SIGKILL) # se qualcuno non è terminato, lo distruggo forzatamente
+            except ProcessLookupError:
+                pass
+            p.wait()
     subprocess.run(["pkill", "-9", "-f", "arducopter"]) # debug / misura di sicurezza
     subprocess.run(["pkill", "-9", "-f", "gz sim"])
     time.sleep(5)
@@ -64,18 +71,29 @@ def registra_fallito(sigma, seed, motivo=""):
             w.writeheader()
         w.writerow({"sigma": sigma, "seed": seed, "esito": "fallito",
                     "errore": "N/A", "x": "N/A", "y": "N/A", "yaw": "N/A"})
+
+# Funzione ausiliaria per controllare che non esista una riga nel file con un certo sigma/seed
+
+def riga_presente(sigma, seed):
+    if not os.path.exists(CSV_OUT):
+        return False
+    with open(CSV_OUT, newline="") as f:
+        return any(riga["sigma"] == str(sigma) and riga["seed"] == str(seed)
+                   for riga in csv.DictReader(f))
+
         
 
 for sigma in LIVELLI_SIGMA:
     for seed in range(RIPETIZIONI):
         processi = crea_ambiente_simulazione()
+        time.sleep(10)
         try:
             if not ambiente_pronto():
                 registra_fallito(sigma, seed, "Ambiente di simulazione non pronto")
                 continue
             subprocess.run(["python3", "main.py", "--sigma", str(sigma), "--seed", str(seed), "--output", CSV_OUT], timeout=300)
         except subprocess.TimeoutExpired:
-            continue
+            print(f"Timeout sigma={sigma} seed={seed}")
         finally:
             distruggi_ambiente_simulazione(processi)
         if not riga_presente(sigma, seed): # se non c'è la riga nel file vuoldire che il main non è arrivato a fine blocco e c'è stato un arresto anomalo, come un timeout

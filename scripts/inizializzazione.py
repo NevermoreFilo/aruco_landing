@@ -31,11 +31,7 @@ class Inizializzazione():
         while not self.master.motors_armed():
             m = self.master.recv_match(type=['HEARTBEAT', 'STATUSTEXT', 'COMMAND_ACK'],
                                 blocking=True, timeout=1)
-            # if m is not None:
-            #     if m.get_type() == 'STATUSTEXT':
-            #         print("Autopilot:", m.text)
-            #     elif m.get_type() == 'COMMAND_ACK':
-            #         print("ACK:", m)
+
             if time.time() - t0 > 30:
                 raise RuntimeError("Errore nell'armamento dei motori o timeout")
         print("Motori armati")

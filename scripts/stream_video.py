@@ -18,6 +18,8 @@ class StreamVideo:
         self.TOPIC = ("/world/iris_runway/model/iris_with_gimbal/model/gimbal/link/"
          "pitch_link/sensor/camera/image/enable_streaming")
 
+        self.flag_stream_attivo = False
+
         def quadrato(lato):
             h = lato / 2
             return np.array([[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]], dtype=np.float32)
@@ -45,13 +47,14 @@ class StreamVideo:
 
 
     def abilita_streaming(self):
+        print("Pubblicazione topic...")
         r = subprocess.run(["gz", "topic", "-t", self.TOPIC, "-m", "gz.msgs.Boolean", "-p", "data: 1"], # comando che altrimenti lancerei da terminale
                         capture_output=True, text=True, timeout=10)
         if r.returncode != 0 or r.stderr:
             print("gz topic:", r.returncode, r.stderr.strip())
 
     # Funzione che continua a provare a pubblicare il topic finché lo stream non parte
-    def _richiedi_stream(self, stop_event, frame_arrivato): 
+    def richiedi_stream(self, stop_event, frame_arrivato): 
         while not stop_event.is_set() and not frame_arrivato.is_set():
             try:
                 self.abilita_streaming()
@@ -60,15 +63,37 @@ class StreamVideo:
             frame_arrivato.wait(3)          # riprova ogni 3s finché non arriva un frame
 
     def avvio_streaming(self, stop_event, timeout=90):
-        cap = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)   
+        print("Avvio streaming...")
+        cap_pronto = threading.Event()
+        cap_holder = {}
+        def apri():
+            cap_holder["cap"] = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)
+            cap_pronto.set()
+
+        try:
+            self.abilita_streaming()
+        except subprocess.TimeoutExpired:
+            pass
+        time.sleep(1)
+
+        # # apre la pipeline
+        threading.Thread(target=apri, daemon=True).start()
+        time.sleep(2)                      # lascio a GStreamer il tempo di mettersi in ascolto
+
+        # accendo lo stream, riprovando finché non arriva un frame
+        frame_arrivato = threading.Event()
+        threading.Thread(target=self.richiedi_stream, args=(stop_event, frame_arrivato),
+                        daemon=True).start()
+
+        if not cap_pronto.wait(timeout):
+            print("Errore: pipeline non aperta")
+            stop_event.set()
+            return
+        cap = cap_holder["cap"]
         if not cap.isOpened():
             print("Errore: impossibile aprire lo stream video")
             stop_event.set()
             return
-
-        frame_arrivato = threading.Event()
-        threading.Thread(target=self._richiedi_stream, args=(stop_event, frame_arrivato),
-                        daemon=True).start()
 
         frame = None
         t0 = time.time()
@@ -83,6 +108,7 @@ class StreamVideo:
         if frame is None:
             cap.release()
             return
+        self.flag_stream_attivo = True
         H, W = frame.shape[:2]
         fx = (W / 2) / np.tan(self.HFOV / 2)
         camera_matrix = np.array([[fx, 0, W / 2], [0, fx, H / 2], [0, 0, 1]], dtype=np.float64)

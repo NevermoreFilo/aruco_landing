@@ -4,7 +4,6 @@ import threading
 import numpy as np
 from pymavlink import mavutil
 import time
-import random
 
 import utils
 
@@ -46,7 +45,7 @@ class ArucoLanding:
         self.VMAX_2 = 0.4 # m/s
         self.ANGOLO_CALIBRAZIONE_YAW_2 = 0  # angolo
         self.TOL_YAW_2 = np.radians(4) # tolleranza errore nello yaw
-        self.TOL_POS_2 = 0.1 # tolleranza nell'errore di x/y per la fase 2
+        self.TOL_POS_2 = 0.05 # tolleranza nell'errore di x/y per la fase 2
 
         self.KP_3 = 0.3 #m/s
         self.VMAX_3 = 0.3 # m/s
@@ -103,9 +102,6 @@ class ArucoLanding:
     )
         
         # Attesa fino a quando la zona target è (quasi raggiunta)
-        last_hb = 0
-        alt = 0.0
-        t0 = time.time()
 
         while True:
             x,y,z = self.get_local_pos() # prelevo la quota attuale
@@ -207,8 +203,8 @@ class ArucoLanding:
             # se tutti i parametri sono nella soglia di tolleranza, sono allineato
             if x_ok and y_ok and yaw_ok:
                 print("Primo allineamento completato, discesa...")
-                self.discesa_drone(-5)                    # scendo a 5m per la fase 2
-                self.attendi_quota(-5)
+                self.discesa_drone(-4)                    # scendo a 5m per la fase 2
+                self.attendi_quota(-4)
                 print("Fase 1 completata")
                 return
             else:

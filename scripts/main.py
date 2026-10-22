@@ -27,13 +27,10 @@ master = mavutil.mavlink_connection('udpin:0.0.0.0:14550')
 risultato = {} # dizionario in cui mantenere una serie di informazioni sull'esecuzione del codice
 
 master.wait_heartbeat()
-
 stream = stream_video.StreamVideo()
 aruco_lander = aruco_landing.ArucoLanding(master, stream, COORDINATE_STAZIONE)
 inizializzatore = inizializzazione.Inizializzazione(master, altitudine_iniziale=20, coordinate_iniziali=(-13, -43, -20)) # la z è negativa perché il drone parte da un'altezza di 10 metri e quindi la posizione locale NED è -10
-
 stop = threading.Event()
-
 # Richiesta dei messaggi a 10 Hz (una chiamata per messaggio)
 for msg_id in (mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT,
                mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE):
@@ -50,6 +47,8 @@ def heartbeat_loop():
 
 def missione():
     try:
+        while  not stream.flag_stream_attivo: # Prima che il drone si muova, attendo che lo stream sia partito
+            time.sleep(0.5) 
         err_nord = random.gauss(0, args.sigma)
         err_est = random.gauss(0, args.sigma)  
         inizializzatore.movimento_drone()
@@ -70,7 +69,7 @@ threading.Thread(target=missione, daemon=True).start()
 stream.avvio_streaming(stop)    # bloccante, nel thread principale (per via di imshow)
 
 nuovo = not os.path.exists(args.output)
-with open(args.output, "a") as f:
+with open(args.output, "a", newline="",) as f:
     writer = csv.DictWriter(f, fieldnames=["sigma", "seed", "esito", "errore", "x", "y", "yaw"]) # testa del file csv
     if nuovo:
         writer.writeheader() # se il file è nuovo scrivo la testa, altrimenti no
