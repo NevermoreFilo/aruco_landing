@@ -25,8 +25,9 @@ random.seed(args.seed)
 master = mavutil.mavlink_connection('udpin:0.0.0.0:14550')
 
 risultato = {} # dizionario in cui mantenere una serie di informazioni sull'esecuzione del codice
-
+print("MAIN - Attesa heartbeat")
 master.wait_heartbeat()
+print("MAIN - Heartbeat ricevuto")
 stream = stream_video.StreamVideo()
 aruco_lander = aruco_landing.ArucoLanding(master, stream, COORDINATE_STAZIONE)
 inizializzatore = inizializzazione.Inizializzazione(master, altitudine_iniziale=20, coordinate_iniziali=(-13, -43, -20)) # la z è negativa perché il drone parte da un'altezza di 10 metri e quindi la posizione locale NED è -10
@@ -51,6 +52,7 @@ def missione():
             time.sleep(0.5) 
         err_nord = random.gauss(0, args.sigma)
         err_est = random.gauss(0, args.sigma)  
+        #stop.wait()
         inizializzatore.movimento_drone()
         aruco_lander.set_gps_bias(err_nord, err_est, LAT_ERR)
         time.sleep(2)

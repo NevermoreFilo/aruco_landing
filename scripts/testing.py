@@ -11,22 +11,29 @@ LIVELLI_SIGMA = [0, 0.5, 1, 2, 3]
 RIPETIZIONI = 10
 CSV_OUT = "risultati.csv"
 CAMPI = ["sigma", "seed", "esito", "errore", "x", "y", "yaw"]
-
+PARAMETRI_CAMERA = os.path.expanduser("~/gz_ws/src/ardupilot_gazebo/config/gazebo-iris-gimbal.parm")
+sitl_log = open("sitl.log", "w")
 # Funzione che crea l'ambiente di simulazione, attivando gazebo e SITL
 def crea_ambiente_simulazione():
+    print("Creazione ambiente di simulazione...")
     procs = []
     procs.append(subprocess.Popen(
         ["gz", "sim", "-v4", "-r", "iris_runway.sdf"],
         preexec_fn=os.setsid, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    time.sleep(10)
     procs.append(subprocess.Popen(
-        ["./sim_vehicle.py", "-v", "ArduCopter", "-f", "JSON", "-w", "--no-rebuild",
-        "--out=127.0.0.1:14550"],
+    ["./sim_vehicle.py", "-D", "-v", "ArduCopter", "-f", "JSON", "-w", "--no-rebuild",
+    f"--add-param-file={PARAMETRI_CAMERA}"],
         stdin=subprocess.PIPE,
         cwd=ARDUPILOT_DIR, preexec_fn=os.setsid,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    time.sleep(5)
+
+    print("Ambiente preparato")
     return procs
 
 def distruggi_ambiente_simulazione(processi):
+    print("Distruzione ambiente simulazione...") 
     for p in reversed(processi): # reversed per chiudere prima SITL di gazebo
         try: 
             os.killpg(os.getpgid(p.pid), signal.SIGTERM) # invio un segnale di terminazione all'ambiente
@@ -48,9 +55,12 @@ def distruggi_ambiente_simulazione(processi):
 
 def ambiente_pronto(timeout=120):
     m = mavutil.mavlink_connection('udpin:0.0.0.0:14550')
+    print("TESTING - Attesa hearbeat")
     try:
-        if m.wait_heartbeat(timeout=timeout) is None: # aspetto heartbeat
+        if m.wait_heartbeat(timeout=10) is None: # aspetto heartbeat
+            print("timeout")
             return False
+        print("TESTING - Hearbeat ricevuto")
         t0 = time.time()
         while time.time() - t0 < timeout:
             g = m.recv_match(type='GPS_RAW_INT', blocking=True, timeout=2) # aspetto di ricevere un messaggio con lo stato del gps
@@ -85,12 +95,16 @@ def riga_presente(sigma, seed):
 
 for sigma in LIVELLI_SIGMA:
     for seed in range(RIPETIZIONI):
+        print("debug")
         processi = crea_ambiente_simulazione()
         time.sleep(10)
+        print("debug2")
         try:
             if not ambiente_pronto():
+                print("Ambiente non pronto")
                 registra_fallito(sigma, seed, "Ambiente di simulazione non pronto")
                 continue
+            print("Run del main...")
             subprocess.run(["python3", "main.py", "--sigma", str(sigma), "--seed", str(seed), "--output", CSV_OUT], timeout=300)
         except subprocess.TimeoutExpired:
             print(f"Timeout sigma={sigma} seed={seed}")

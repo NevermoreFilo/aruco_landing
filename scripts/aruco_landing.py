@@ -267,7 +267,7 @@ class ArucoLanding:
 
     # Funzione per la gestione della fase 3: allineamento finale ed atterraggio
     def fase_3(self):
-        self.set_param('LAND_SPEED', 20)   # cm/s
+        self.set_param('LAND_SPEED', 10)   # cm/s
         time.sleep(2)
         ids = self.ID_ATTESI_3
         print("Allineamento fase 3")
