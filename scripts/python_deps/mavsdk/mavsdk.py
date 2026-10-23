@@ -1,0 +1,580 @@
+"""Main ctypes wrapper for cmavsdk library"""
+
+import atexit
+import ctypes
+import threading
+import weakref
+
+from typing import Optional, List, Callable, Any
+
+from .cmavsdk_loader import _cmavsdk_lib
+from .connection_result import ConnectionResult
+from .component_type import ComponentType
+from .exceptions import ConnectionError
+from .enums import ForwardingOption
+from .server_component import ServerComponent
+from .system import System
+from .types import (
+    ConnectionResultWithHandle,
+    FirstAutopilotCallback,
+    NewSystemCallback,
+    RawBytesCallback,
+)
+
+
+# Instances that have not been destroyed yet, so that a process exiting without a
+# destroy() still releases them. Weak, so that an instance the caller drops is
+# collected (and released by __del__) rather than pinned until exit.
+_live_instances: "weakref.WeakSet[Mavsdk]" = weakref.WeakSet()
+
+
+@atexit.register
+def _destroy_live_instances() -> None:
+    for instance in list(_live_instances):
+        instance.destroy()
+
+
+class Configuration:
+    """Wrapper for mavsdk_configuration_t"""
+
+    def __init__(self, handle: ctypes.c_void_p):
+        self._lib = _cmavsdk_lib
+        self._handle = handle
+        # destroy() can be reached from any thread: explicitly, from atexit, or
+        # from __del__ whenever the garbage collector happens to run. Without this
+        # lock two of them can both find a live handle and release it twice, which
+        # corrupts the heap.
+        self._destroy_lock = threading.Lock()
+
+    @classmethod
+    def create_with_component_type(cls, component_type: ComponentType):
+        """Create configuration with component type"""
+        handle = _cmavsdk_lib.mavsdk_configuration_create_with_component_type(
+            int(component_type)
+        )
+        return cls(handle)
+
+    @classmethod
+    def create_manual(
+        cls, system_id: int, component_id: int, always_send_heartbeats: bool
+    ):
+        """Create manual configuration"""
+        handle = _cmavsdk_lib.mavsdk_configuration_create_manual(
+            system_id, component_id, int(always_send_heartbeats)
+        )
+        return cls(handle)
+
+    def destroy(self):
+        """Destroy configuration. Idempotent, safe from any thread."""
+        with self._destroy_lock:
+            handle, self._handle = self._handle, None
+
+        if handle:
+            self._lib.mavsdk_configuration_destroy(handle)
+
+    @property
+    def system_id(self) -> int:
+        return self._lib.mavsdk_configuration_get_system_id(self._handle)
+
+    @system_id.setter
+    def system_id(self, value: int):
+        self._lib.mavsdk_configuration_set_system_id(self._handle, value)
+
+    @property
+    def component_id(self) -> int:
+        return self._lib.mavsdk_configuration_get_component_id(self._handle)
+
+    @component_id.setter
+    def component_id(self, value: int):
+        self._lib.mavsdk_configuration_set_component_id(self._handle, value)
+
+    def __del__(self):
+        self.destroy()
+
+
+class Mavsdk:
+    """Python wrapper for cmavsdk library"""
+
+    def __init__(self, configuration: Configuration):
+        """
+        Initialize the cmavsdk wrapper
+
+        Args:
+            configuration: Configuration
+        """
+        self._lib = _cmavsdk_lib
+
+        # Stream subscriptions, by handle: the trampoline to keep alive and the
+        # unsubscribe to call for it. destroy() releases whatever is left. One dict
+        # and not two, so that a handle cannot end up released twice because only
+        # one of them was updated.
+        self._subscriptions = {}
+
+        # Connection handles handed out by add_any_connection_with_handle(). The C
+        # wrapper allocates one per call and remove_connection() frees it, so they
+        # are tracked here: removing one twice must not free it twice, and
+        # destroy() has to release the ones the caller kept.
+        self._connections = set()
+
+        # Systems and server components own a handle each and must be released before
+        # mavsdk_destroy runs, since Python's GC gives no ordering guarantee between
+        # them and this object. The set is weak so that a System dropped by the caller
+        # is still collected promptly; destroy() only has to sweep whatever survives.
+        self._children = weakref.WeakSet()
+
+        self._handle = self._lib.mavsdk_create(configuration._handle)
+        # destroy() can be reached from any thread: explicitly, from atexit, or
+        # from __del__ whenever the garbage collector happens to run. Without this
+        # lock two of them can both find a live handle and release it twice, which
+        # corrupts the heap.
+        self._destroy_lock = threading.Lock()
+
+        # Not atexit.register(self.destroy): that bound method would keep this
+        # instance alive for the rest of the process, so dropping one would leave
+        # its connections and io thread running until exit.
+        _live_instances.add(self)
+
+    def _track(self, child):
+        """Register a handle-owning child so destroy() can release it."""
+        self._children.add(child)
+        return child
+
+    def _unsubscribe(self, handle: ctypes.c_void_p):
+        """Release one subscription, if this instance still holds it.
+
+        Taking the entry under the lock leaves the handle to exactly one of
+        destroy() and this, so it is released once. The C call stays outside the
+        lock: it waits for a running callback, and a callback may unsubscribe.
+        """
+        with self._destroy_lock:
+            if not self._handle:
+                return
+            entry = self._subscriptions.pop(handle, None)
+            if entry is None:
+                return
+            mavsdk_handle = self._handle
+
+        _, unsubscribe = entry
+        unsubscribe(mavsdk_handle, handle)
+
+    def version(self) -> str:
+        """Get MAVSDK version string"""
+        version_bytes = self._lib.mavsdk_version(self._handle)
+        return version_bytes.decode("utf-8") if version_bytes else ""
+
+    def add_any_connection(self, connection_url: str) -> ConnectionResult:
+        """Add a connection"""
+        result = self._lib.mavsdk_add_any_connection(
+            self._handle, connection_url.encode("utf-8")
+        )
+        return ConnectionResult(result)
+
+    def add_any_connection_with_forwarding(
+        self, connection_url: str, forwarding_option: ForwardingOption
+    ) -> ConnectionResult:
+        """Add a connection with forwarding option"""
+        result = self._lib.mavsdk_add_any_connection_with_forwarding(
+            self._handle,
+            connection_url.encode("utf-8"),
+            ctypes.c_int(forwarding_option.value),
+        )
+        return ConnectionResult(result)
+
+    def add_any_connection_with_handle(self, connection_url: str):
+        """Add a connection and get handle"""
+        result = self._lib.mavsdk_add_any_connection_with_handle(
+            self._handle, connection_url.encode("utf-8")
+        )
+        return self._track_connection(result)
+
+    def add_any_connection_with_handle_and_forwarding(
+        self, connection_url: str, forwarding_option: ForwardingOption
+    ):
+        """Add a connection with forwarding option and get handle"""
+        result = self._lib.mavsdk_add_any_connection_with_handle_and_forwarding(
+            self._handle,
+            connection_url.encode("utf-8"),
+            ctypes.c_int(forwarding_option.value),
+        )
+        return self._track_connection(result)
+
+    def _track_connection(self, result) -> ctypes.c_void_p:
+        """Take ownership of the handle the C wrapper allocated for this result."""
+        if result.result != ConnectionResult.SUCCESS:
+            # Allocated whether or not the connection came up, so it has to go
+            # back even though there is no connection to remove.
+            self._lib.mavsdk_remove_connection(self._handle, result.handle)
+            raise ConnectionError(
+                f"Connection failed: {ConnectionResult(result.result).name}"
+            )
+
+        self._connections.add(result.handle)
+        return result.handle
+
+    def remove_connection(self, handle: ctypes.c_void_p):
+        """Remove a connection
+
+        Idempotent. Does nothing once this instance is destroyed, which removes
+        its connections already. Like _unsubscribe(), the handle is taken under
+        the lock so that it is freed exactly once.
+        """
+        with self._destroy_lock:
+            if not self._handle:
+                return
+            if handle not in self._connections:
+                return
+            self._connections.remove(handle)
+            mavsdk_handle = self._handle
+
+        self._lib.mavsdk_remove_connection(mavsdk_handle, handle)
+
+    def system_count(self) -> int:
+        """Get number of discovered systems"""
+        return self._lib.mavsdk_system_count(self._handle)
+
+    def get_systems(self) -> List[System]:
+        """Get all discovered systems"""
+        count = ctypes.c_size_t()
+        systems_ptr = self._lib.mavsdk_get_systems(self._handle, ctypes.byref(count))
+
+        if not systems_ptr:
+            return []
+
+        systems = [
+            self._track(System(self._lib, systems_ptr[i])) for i in range(count.value)
+        ]
+
+        # Frees the array of pointers only; each element is a separate allocation
+        # now owned by the System wrapper above.
+        self._lib.mavsdk_free_systems_array(systems_ptr)
+        return systems
+
+    def first_autopilot(self, timeout_s: float = 3.0) -> Optional[System]:
+        """Wait for and return first autopilot system"""
+        handle = self._lib.mavsdk_first_autopilot(self._handle, timeout_s)
+        if handle:
+            return self._track(System(self._lib, handle))
+        return None
+
+    def first_autopilot_async(
+        self, timeout_s: float, callback: Callable[[Optional[System]], None]
+    ):
+        """Wait for the first autopilot without blocking.
+
+        *callback* is called exactly once from MAVSDK's callback thread, with the
+        autopilot system, or with None once *timeout_s* expires, unless the wait is
+        cancelled first. It is never called from within this call. A timeout of 0
+        checks once, a negative timeout waits forever.
+
+        Returns a handle for :meth:`cancel_first_autopilot`, which also releases it.
+        Call that once the result is no longer needed, also after the callback has
+        run; :meth:`destroy` releases any handle that is left.
+        """
+
+        def on_result(system_handle, _user_data):
+            system = None
+            if system_handle:
+                system = self._track(System(self._lib, system_handle))
+            callback(system)
+
+        c_callback = FirstAutopilotCallback(on_result)
+        handle = self._lib.mavsdk_first_autopilot_async(
+            self._handle, timeout_s, c_callback, None
+        )
+
+        self._subscriptions[handle] = (
+            c_callback,
+            self._lib.mavsdk_cancel_first_autopilot,
+        )
+
+        return handle
+
+    def cancel_first_autopilot(self, handle: ctypes.c_void_p):
+        """Cancel a wait started with :meth:`first_autopilot_async` and release it.
+
+        Once this returns, the callback is neither running nor going to run.
+        Idempotent. Does nothing once this instance is destroyed, which cancels
+        already.
+        """
+        self._unsubscribe(handle)
+
+    def subscribe_on_new_system(
+        self, callback: Callable[[Any], None], user_data: Any = None
+    ):
+        """Subscribe to new system discoveries"""
+        c_callback = NewSystemCallback(lambda ud: callback(user_data))
+
+        handle = self._lib.mavsdk_subscribe_on_new_system(
+            self._handle, c_callback, None
+        )
+
+        self._subscriptions[handle] = (
+            c_callback,
+            self._lib.mavsdk_unsubscribe_on_new_system,
+        )
+
+        return handle
+
+    def unsubscribe_on_new_system(self, handle: ctypes.c_void_p):
+        """Unsubscribe from new system discoveries
+
+        Idempotent. Does nothing once this instance is destroyed, which
+        unsubscribes already.
+        """
+        self._unsubscribe(handle)
+
+    def server_component(self, instance: int = 0):
+        """Get server component by instance"""
+        handle = self._lib.mavsdk_server_component(self._handle, instance)
+        if handle:
+            return self._track(ServerComponent(self._lib, handle))
+        return None
+
+    def server_component_by_type(
+        self, component_type: ComponentType, instance: int = 0
+    ):
+        """Get server component by type and instance"""
+        handle = self._lib.mavsdk_server_component_by_type(
+            self._handle, int(component_type), instance
+        )
+        if handle:
+            return self._track(ServerComponent(self._lib, handle))
+        return None
+
+    def server_component_by_id(self, component_id: int):
+        """Get server component by component ID"""
+        handle = self._lib.mavsdk_server_component_by_id(self._handle, component_id)
+        if handle:
+            return self._track(ServerComponent(self._lib, handle))
+        return None
+
+    def pass_received_raw_bytes(self, data: bytes):
+        """Pass received raw MAVLink bytes into MAVSDK for processing.
+        Requires a 'raw://' connection."""
+        buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+        self._lib.mavsdk_pass_received_raw_bytes(self._handle, buf, len(data))
+
+    def subscribe_raw_bytes_to_be_sent(self, callback: Callable[[bytes], None]):
+        """Subscribe to raw bytes to be sent out.
+        Requires a 'raw://' connection.
+        Returns a handle for unsubscribing."""
+
+        def _wrapper(bytes_ptr, length, user_data):
+            data = bytes(bytes_ptr[:length])
+            callback(data)
+
+        c_callback = RawBytesCallback(_wrapper)
+        handle = self._lib.mavsdk_subscribe_raw_bytes_to_be_sent(
+            self._handle, c_callback, None
+        )
+        self._subscriptions[handle] = (
+            c_callback,
+            self._lib.mavsdk_unsubscribe_raw_bytes_to_be_sent,
+        )
+        return handle
+
+    def unsubscribe_raw_bytes_to_be_sent(self, handle):
+        """Unsubscribe from raw bytes to be sent.
+
+        Idempotent. Does nothing once this instance is destroyed, which
+        unsubscribes already.
+        """
+        self._unsubscribe(handle)
+
+    def destroy(self):
+        """Destroy the Mavsdk instance. Idempotent, safe from any thread."""
+        _live_instances.discard(self)
+
+        with self._destroy_lock:
+            handle, self._handle = self._handle, None
+            # Taken under the same lock as the handle, so an unsubscribe racing
+            # this either gets its entry and releases it itself, or finds the
+            # instance already gone. Neither path releases a handle twice.
+            subscriptions = list(self._subscriptions.items())
+            self._subscriptions.clear()
+            connections = list(self._connections)
+            self._connections.clear()
+
+        if handle:
+            # Release systems and server components first. Their handles are
+            # shared_ptrs into objects owned by this instance, so they must not
+            # outlive mavsdk_destroy. Snapshot the weak set before iterating, since
+            # destroy() can drop the last reference and mutate it underneath us.
+            for child in list(self._children):
+                child.destroy()
+            self._children.clear()
+
+            # The C wrapper does not track these, so release them here. unsubscribe()
+            # waits for a running callback, so this cannot race one. The snapshot
+            # also holds the trampolines until past mavsdk_destroy, so a late
+            # callback cannot jump into collected memory.
+            for sub_handle, (_cb, unsubscribe) in subscriptions:
+                unsubscribe(handle, sub_handle)
+
+            # Same story for the connection handles: the C wrapper allocated them
+            # and only remove_connection() frees them. Removing the connection
+            # along the way is no loss right before mavsdk_destroy.
+            for connection_handle in connections:
+                self._lib.mavsdk_remove_connection(handle, connection_handle)
+
+            self._lib.mavsdk_destroy(handle)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.destroy()
+
+    def __del__(self):
+        try:
+            import sys
+
+            if sys is not None and hasattr(self, "_handle") and self._handle:
+                import warnings
+
+                warnings.warn(
+                    "Mavsdk destroyed by garbage collector. Use context manager or call destroy() explicitly.",
+                    ResourceWarning,
+                    stacklevel=2,
+                )
+                self.destroy()
+        except (ImportError, AttributeError):
+            # Python is shutting down, skip cleanup silently
+            pass
+
+
+# Configuration functions
+_cmavsdk_lib.mavsdk_configuration_create_with_component_type.argtypes = [ctypes.c_int]
+_cmavsdk_lib.mavsdk_configuration_create_with_component_type.restype = ctypes.c_void_p
+
+_cmavsdk_lib.mavsdk_configuration_create_manual.argtypes = [
+    ctypes.c_uint32,
+    ctypes.c_uint8,
+    ctypes.c_int,
+]
+_cmavsdk_lib.mavsdk_configuration_create_manual.restype = ctypes.c_void_p
+
+_cmavsdk_lib.mavsdk_configuration_destroy.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_configuration_destroy.restype = None
+
+_cmavsdk_lib.mavsdk_configuration_get_system_id.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_configuration_get_system_id.restype = ctypes.c_uint32
+
+_cmavsdk_lib.mavsdk_configuration_set_system_id.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_uint32,
+]
+_cmavsdk_lib.mavsdk_configuration_set_system_id.restype = None
+
+_cmavsdk_lib.mavsdk_configuration_get_component_id.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_configuration_get_component_id.restype = ctypes.c_uint8
+
+_cmavsdk_lib.mavsdk_configuration_set_component_id.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_uint8,
+]
+_cmavsdk_lib.mavsdk_configuration_set_component_id.restype = None
+
+# Core functions
+_cmavsdk_lib.mavsdk_create.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_create.restype = ctypes.c_void_p
+
+_cmavsdk_lib.mavsdk_destroy.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_destroy.restype = None
+
+_cmavsdk_lib.mavsdk_version.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_version.restype = ctypes.c_char_p
+
+# Connection functions
+_cmavsdk_lib.mavsdk_add_any_connection.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+_cmavsdk_lib.mavsdk_add_any_connection.restype = ctypes.c_int
+
+_cmavsdk_lib.mavsdk_add_any_connection_with_forwarding.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_char_p,
+    ctypes.c_int,
+]
+_cmavsdk_lib.mavsdk_add_any_connection_with_forwarding.restype = ctypes.c_int
+
+_cmavsdk_lib.mavsdk_add_any_connection_with_handle.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_char_p,
+]
+_cmavsdk_lib.mavsdk_add_any_connection_with_handle.restype = ConnectionResultWithHandle
+
+_cmavsdk_lib.mavsdk_add_any_connection_with_handle_and_forwarding.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_char_p,
+    ctypes.c_int,
+]
+_cmavsdk_lib.mavsdk_add_any_connection_with_handle_and_forwarding.restype = (
+    ConnectionResultWithHandle
+)
+
+_cmavsdk_lib.mavsdk_remove_connection.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_remove_connection.restype = None
+
+# System functions
+_cmavsdk_lib.mavsdk_system_count.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_system_count.restype = ctypes.c_size_t
+
+_cmavsdk_lib.mavsdk_get_systems.argtypes = [
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_size_t),
+]
+_cmavsdk_lib.mavsdk_get_systems.restype = ctypes.POINTER(ctypes.c_void_p)
+
+_cmavsdk_lib.mavsdk_free_systems_array.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+_cmavsdk_lib.mavsdk_free_systems_array.restype = None
+
+_cmavsdk_lib.mavsdk_first_autopilot.argtypes = [ctypes.c_void_p, ctypes.c_double]
+_cmavsdk_lib.mavsdk_first_autopilot.restype = ctypes.c_void_p
+
+_cmavsdk_lib.mavsdk_first_autopilot_async.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_double,
+    FirstAutopilotCallback,
+    ctypes.c_void_p,
+]
+_cmavsdk_lib.mavsdk_first_autopilot_async.restype = ctypes.c_void_p
+
+_cmavsdk_lib.mavsdk_cancel_first_autopilot.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+]
+_cmavsdk_lib.mavsdk_cancel_first_autopilot.restype = None
+
+# Subscription functions
+_cmavsdk_lib.mavsdk_subscribe_on_new_system.argtypes = [
+    ctypes.c_void_p,
+    NewSystemCallback,
+    ctypes.c_void_p,
+]
+_cmavsdk_lib.mavsdk_subscribe_on_new_system.restype = ctypes.c_void_p
+
+_cmavsdk_lib.mavsdk_unsubscribe_on_new_system.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+]
+_cmavsdk_lib.mavsdk_unsubscribe_on_new_system.restype = None
+
+# Raw bytes functions
+_cmavsdk_lib.mavsdk_pass_received_raw_bytes.argtypes = [
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_uint8),
+    ctypes.c_size_t,
+]
+_cmavsdk_lib.mavsdk_pass_received_raw_bytes.restype = None
+
+_cmavsdk_lib.mavsdk_subscribe_raw_bytes_to_be_sent.argtypes = [
+    ctypes.c_void_p,
+    RawBytesCallback,
+    ctypes.c_void_p,
+]
+_cmavsdk_lib.mavsdk_subscribe_raw_bytes_to_be_sent.restype = ctypes.c_void_p
+
+_cmavsdk_lib.mavsdk_unsubscribe_raw_bytes_to_be_sent.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+]
+_cmavsdk_lib.mavsdk_unsubscribe_raw_bytes_to_be_sent.restype = None

@@ -1,0 +1,258 @@
+import ctypes
+import threading
+import weakref
+
+from typing import Any, Callable, List
+
+from . import _legacy
+from .autopilot import Autopilot
+from .cmavsdk_loader import _cmavsdk_lib
+from .vehicle import Vehicle
+
+
+class System:
+    """Wrapper for mavsdk_system_t
+
+    Each instance owns its handle. ``mavsdk_get_systems`` and
+    ``mavsdk_first_autopilot`` hand out a fresh ``shared_ptr<System>`` per call --
+    ``mavsdk_free_systems_array`` only frees the array, not the elements -- so every
+    wrapper must release exactly one handle. Instances are registered with the owning
+    :class:`~mavsdk.mavsdk.Mavsdk`, which destroys any that are still alive before it
+    destroys itself, because Python's garbage collector gives no ordering guarantee
+    between the two.
+    """
+
+    def __new__(cls, *args, **kwargs):
+        # Systems are handed out by Mavsdk. Anything else is most likely code
+        # written for the gRPC wrapper, where `System()` was the entry point.
+        # Checked here rather than in __init__, so that no half-constructed
+        # instance reaches __del__.
+        _legacy.check_system_args(
+            len(args) == 2 and isinstance(args[0], ctypes.CDLL), kwargs
+        )
+        return super().__new__(cls)
+
+    def __init__(self, lib: ctypes.CDLL, handle: ctypes.c_void_p):
+        self._lib = lib
+        self._handle = handle
+        # destroy() can be reached from any thread: explicitly, from the owner
+        # tearing down, or from __del__ whenever the garbage collector happens to
+        # run. Without this lock two of them can both find a live handle and
+        # release it twice, which corrupts the heap.
+        self._destroy_lock = threading.Lock()
+        # Stream subscriptions, by handle: the trampoline to keep alive and the
+        # unsubscribe to call for it. destroy() releases whatever is left.
+        self._subscriptions = {}
+        self._plugins = weakref.WeakSet()
+
+    def _track_plugin(self, plugin) -> None:
+        """Register a plugin so it is destroyed before this system goes away.
+
+        A plugin owns a C++ object that reaches back into MavsdkImpl, so it must not
+        outlive mavsdk_destroy. Plugins register themselves from their constructor.
+        The set is weak so that a plugin the caller drops is collected promptly
+        rather than pinned for the lifetime of the system.
+
+        The plugin gets a strong reference back, so that this System outlives it.
+        Without it ``MissionRaw(mavsdk.first_autopilot(10.0))`` would collect the
+        temporary System as soon as the constructor returned, and destroy() would
+        take the still-referenced plugin down with it -- a segfault on the next
+        call. This is not a reference cycle: the set above is weak.
+        """
+        self._plugins.add(plugin)
+        plugin._owner = self
+
+    def destroy(self) -> None:
+        """Release the underlying system handle. Idempotent, safe from any thread."""
+        with self._destroy_lock:
+            handle, self._handle = self._handle, None
+            # Taken under the same lock as the handle, so an unsubscribe racing
+            # this either gets its entry and releases it itself, or finds the
+            # system already gone. Neither path releases a handle twice.
+            subscriptions = list(self._subscriptions.items())
+            self._subscriptions.clear()
+
+        if handle:
+            # Plugins first -- they are the ones holding references into MavsdkImpl.
+            for plugin in list(self._plugins):
+                plugin.destroy()
+            self._plugins.clear()
+
+            # Unsubscribe before releasing the handle. Dropping our shared_ptr does
+            # not destroy the C++ System -- MavsdkImpl owns it -- so any subscription
+            # left active would keep firing into ctypes trampolines that are about to
+            # be garbage collected.
+            for subscription_handle, (_cb, unsubscribe) in subscriptions:
+                unsubscribe(handle, subscription_handle)
+
+            self._lib.mavsdk_system_destroy(handle)
+
+    def __del__(self):
+        self.destroy()
+
+    def _require_handle(self) -> ctypes.c_void_p:
+        """Fail loudly rather than dereferencing a null handle in C.
+
+        Before the handle was ever released this could not happen; now that it is,
+        using a System after its Mavsdk is gone would segfault without this check.
+        """
+        if not self._handle:
+            raise RuntimeError(
+                "System has been destroyed (its Mavsdk was destroyed, "
+                "or destroy() was called explicitly)"
+            )
+        return self._handle
+
+    def has_autopilot(self) -> bool:
+        """Check if system has autopilot"""
+        return self._lib.mavsdk_system_has_autopilot(self._require_handle())
+
+    def is_standalone(self) -> bool:
+        """Check if system is standalone"""
+        return self._lib.mavsdk_system_is_standalone(self._require_handle())
+
+    def has_camera(self, camera_id: int = -1) -> bool:
+        """Check if system has camera"""
+        return self._lib.mavsdk_system_has_camera(self._require_handle(), camera_id)
+
+    def has_gimbal(self) -> bool:
+        """Check if system has gimbal"""
+        return self._lib.mavsdk_system_has_gimbal(self._require_handle())
+
+    def is_connected(self) -> bool:
+        """Check if system is connected"""
+        return self._lib.mavsdk_system_is_connected(self._require_handle())
+
+    def get_system_id(self) -> int:
+        """Get system ID"""
+        return self._lib.mavsdk_system_get_system_id(self._require_handle())
+
+    def component_ids(self) -> List[int]:
+        """Get list of component IDs"""
+        count = ctypes.c_size_t()
+        ids_ptr = self._lib.mavsdk_system_component_ids(
+            self._require_handle(), ctypes.byref(count)
+        )
+
+        if not ids_ptr:
+            return []
+
+        ids = [ids_ptr[i] for i in range(count.value)]
+        self._lib.mavsdk_system_free_component_ids(ids_ptr)
+        return ids
+
+    def subscribe_is_connected(
+        self, callback: Callable[[bool, Any], None], user_data: Any = None
+    ) -> ctypes.c_void_p:
+        """Subscribe to connection state changes
+
+        Returns the subscription handle to pass to
+        :meth:`unsubscribe_is_connected`.
+        """
+        c_callback = IsConnectedCallback(
+            lambda connected, ud: callback(connected, user_data)
+        )
+
+        subscription_handle = self._lib.mavsdk_system_subscribe_is_connected(
+            self._require_handle(), c_callback, None
+        )
+
+        # Held until unsubscribe: if the trampoline is collected while MAVSDK still
+        # holds the pointer, the next callback jumps into freed memory.
+        self._subscriptions[subscription_handle] = (
+            c_callback,
+            self._lib.mavsdk_system_unsubscribe_is_connected,
+        )
+
+        return subscription_handle
+
+    def unsubscribe_is_connected(self, handle: ctypes.c_void_p) -> None:
+        """Unsubscribe from connection state changes
+
+        Idempotent, and a no-op if the system is already destroyed, which
+        unsubscribed everything anyway. Callers unsubscribe from ``finally``
+        blocks that race teardown, so this must not raise there.
+
+        Taking the entry under the lock leaves the handle to exactly one of
+        destroy() and this, so it is released once. The C call stays outside the
+        lock: it waits for a running callback, and a callback may unsubscribe.
+        """
+        with self._destroy_lock:
+            if not self._handle:
+                return
+            entry = self._subscriptions.pop(handle, None)
+            if entry is None:
+                return
+            system_handle = self._handle
+
+        _, unsubscribe = entry
+        unsubscribe(system_handle, handle)
+
+    def enable_timesync(self) -> None:
+        """Enable time synchronization using the TIMESYNC messages."""
+        self._lib.mavsdk_system_enable_timesync(self._require_handle())
+
+    def autopilot_type(self) -> Autopilot:
+        """Get the autopilot type reported by this system"""
+        return Autopilot(self._lib.mavsdk_system_autopilot_type(self._require_handle()))
+
+    def vehicle_type(self) -> Vehicle:
+        """Get the vehicle type reported by this system"""
+        return Vehicle(self._lib.mavsdk_system_vehicle_type(self._require_handle()))
+
+
+IsConnectedCallback = ctypes.CFUNCTYPE(None, ctypes.c_bool, ctypes.c_void_p)
+
+_cmavsdk_lib.mavsdk_system_destroy.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_system_destroy.restype = None
+
+_cmavsdk_lib.mavsdk_system_has_autopilot.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_system_has_autopilot.restype = ctypes.c_bool
+
+_cmavsdk_lib.mavsdk_system_is_standalone.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_system_is_standalone.restype = ctypes.c_bool
+
+_cmavsdk_lib.mavsdk_system_has_camera.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_cmavsdk_lib.mavsdk_system_has_camera.restype = ctypes.c_bool
+
+_cmavsdk_lib.mavsdk_system_has_gimbal.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_system_has_gimbal.restype = ctypes.c_bool
+
+_cmavsdk_lib.mavsdk_system_is_connected.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_system_is_connected.restype = ctypes.c_bool
+
+_cmavsdk_lib.mavsdk_system_get_system_id.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_system_get_system_id.restype = ctypes.c_uint32
+
+_cmavsdk_lib.mavsdk_system_component_ids.argtypes = [
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_size_t),
+]
+_cmavsdk_lib.mavsdk_system_component_ids.restype = ctypes.POINTER(ctypes.c_uint8)
+
+_cmavsdk_lib.mavsdk_system_free_component_ids.argtypes = [
+    ctypes.POINTER(ctypes.c_uint8)
+]
+_cmavsdk_lib.mavsdk_system_free_component_ids.restype = None
+
+_cmavsdk_lib.mavsdk_system_subscribe_is_connected.argtypes = [
+    ctypes.c_void_p,
+    IsConnectedCallback,
+    ctypes.c_void_p,
+]
+_cmavsdk_lib.mavsdk_system_subscribe_is_connected.restype = ctypes.c_void_p
+
+_cmavsdk_lib.mavsdk_system_unsubscribe_is_connected.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+]
+_cmavsdk_lib.mavsdk_system_unsubscribe_is_connected.restype = None
+
+_cmavsdk_lib.mavsdk_system_enable_timesync.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_system_enable_timesync.restype = None
+
+_cmavsdk_lib.mavsdk_system_autopilot_type.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_system_autopilot_type.restype = ctypes.c_int
+
+_cmavsdk_lib.mavsdk_system_vehicle_type.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_system_vehicle_type.restype = ctypes.c_int

@@ -1,0 +1,77 @@
+import ctypes
+import threading
+import weakref
+
+from .cmavsdk_loader import _cmavsdk_lib
+
+
+class ServerComponent:
+    """Wrapper for mavsdk_server_component_t
+
+    Like :class:`~mavsdk.system.System`, each instance owns its handle: the
+    ``mavsdk_server_component*`` family allocates a fresh ``shared_ptr`` per call,
+    even when the same underlying component is returned. Instances are registered
+    with the owning Mavsdk so they are released before it destroys itself.
+    """
+
+    def __init__(self, lib: ctypes.CDLL, handle: ctypes.c_void_p):
+        self._lib = lib
+        self._handle = handle
+        self._plugins = weakref.WeakSet()
+        # destroy() can be reached from any thread: explicitly, from the owner
+        # tearing down, or from __del__ whenever the garbage collector happens to
+        # run. Without this lock two of them can both find a live handle and
+        # release it twice, which corrupts the heap.
+        self._destroy_lock = threading.Lock()
+
+    def _track_plugin(self, plugin) -> None:
+        """Register a server plugin so it is destroyed before this component goes.
+
+        Same reasoning as :meth:`mavsdk.system.System._track_plugin`: the plugin
+        owns a C++ object reaching into MavsdkImpl and must not outlive it, and
+        the strong reference back keeps this component alive for as long as the
+        plugin is -- otherwise ``MissionRawServer(mavsdk.server_component())``
+        destroys the plugin as soon as the temporary component is collected.
+        """
+        self._plugins.add(plugin)
+        plugin._owner = self
+
+    def destroy(self) -> None:
+        """Release the handle. Idempotent, safe from any thread."""
+        with self._destroy_lock:
+            handle, self._handle = self._handle, None
+
+        if handle:
+            for plugin in list(self._plugins):
+                plugin.destroy()
+            self._plugins.clear()
+
+            self._lib.mavsdk_server_component_destroy(handle)
+
+    def __del__(self):
+        self.destroy()
+
+    def _require_handle(self) -> ctypes.c_void_p:
+        if not self._handle:
+            raise RuntimeError(
+                "ServerComponent has been destroyed (its Mavsdk was destroyed, "
+                "or destroy() was called explicitly)"
+            )
+        return self._handle
+
+
+_cmavsdk_lib.mavsdk_server_component_destroy.argtypes = [ctypes.c_void_p]
+_cmavsdk_lib.mavsdk_server_component_destroy.restype = None
+
+_cmavsdk_lib.mavsdk_server_component.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+_cmavsdk_lib.mavsdk_server_component.restype = ctypes.c_void_p
+
+_cmavsdk_lib.mavsdk_server_component_by_type.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_int,
+    ctypes.c_uint,
+]
+_cmavsdk_lib.mavsdk_server_component_by_type.restype = ctypes.c_void_p
+
+_cmavsdk_lib.mavsdk_server_component_by_id.argtypes = [ctypes.c_void_p, ctypes.c_uint8]
+_cmavsdk_lib.mavsdk_server_component_by_id.restype = ctypes.c_void_p

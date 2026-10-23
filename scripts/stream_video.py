@@ -1,8 +1,11 @@
+#export GZ_SIM_SYSTEM_PLUGIN_PATH="$HOME/gz_ws/src/ardupilot_gazebo/build:$GZ_SIM_SYSTEM_PLUGIN_PATH"
+
 import threading
 import time
 import cv2
 import numpy as np
 import subprocess
+import os
 
 class StreamVideo:
     def __init__(self):
@@ -11,7 +14,26 @@ class StreamVideo:
             "! rtph264depay ! avdec_h264 ! videoconvert "
             "! appsink name=appsink sync=false drop=true max-buffers=1"
         )
-        self.aruco_dict = cv2.aruco.getPredefinedDictionary(
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+            "protocol_whitelist;file,udp,rtp|"
+            "fflags;nobuffer|"
+            "flags;low_delay|"
+            "analyzduration;0|"
+            "threads;1|"
+            "max_delay;0"
+        )
+        self.sdp_path = "/tmp/stream.sdp"
+        sdp = (
+            "v=0\n"
+            "o=- 0 0 IN IP4 127.0.0.1\n"
+            "s=No Name\n"
+            "c=IN IP4 127.0.0.1\n"
+            "t=0 0\n"
+            "a=tool:libavformat\n"
+            "m=video 5600 RTP/AVP 96\n"
+            "a=rtpmap:96 H264/90000\n"
+        )
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary( # dizionario dei marker
             cv2.aruco.DICT_4X4_50
         )
 
@@ -22,20 +44,20 @@ class StreamVideo:
             self.detector_params
         )
 
-        self.dist_coeffs = np.zeros((5, 1))
-        self.HFOV = 1.047
+        self.dist_coeffs = np.zeros((5, 1)) # coefficienti distorsione della telecamera
+        self.HFOV = 1.047 # fov telecamera (letto da sdf)
         self.TOPIC = ("/world/iris_runway/model/iris_with_gimbal/model/gimbal/link/"
          "pitch_link/sensor/camera/image/enable_streaming")
 
-        self.flag_stream_attivo = False
+        self.flag_stream_attivo = False # flag che evita che il drone parta fino a quando lo stream non è online
 
         def quadrato(lato):
             h = lato / 2
             return np.array([[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]], dtype=np.float32)
 
-        self.marker_points_1 = quadrato(1.0)    # ID 0
-        self.marker_points_2 = quadrato(0.4)    # ID 1-4
-        self.marker_points_3 = quadrato(0.1)    # ID 5-8
+        self.marker_points_1 = quadrato(1.0)    # ID 0, 1 x 1 metri
+        self.marker_points_2 = quadrato(0.4)    # ID 1-4, 40 x 40 cm
+        self.marker_points_3 = quadrato(0.1)    # ID 5-8, 10 x 10
 
         self._lock = threading.Lock()
         self._marker = {}                        # {id: dict(tvec, angolo, t)}
@@ -76,7 +98,7 @@ class StreamVideo:
         cap_pronto = threading.Event()
         cap_holder = {}
         def apri():
-            cap_holder["cap"] = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)
+            cap_holder["cap"] = cv2.VideoCapture(self.sdp_path, cv2.CAP_FFMPEG)
             cap_pronto.set()
 
         try:
@@ -103,7 +125,6 @@ class StreamVideo:
             print("Errore: impossibile aprire lo stream video")
             stop_event.set()
             return
-
         frame = None
         t0 = time.time()
         while frame is None and not stop_event.is_set():
@@ -131,7 +152,7 @@ class StreamVideo:
             attuali = {}
             if ids is not None:
                 for corner, marker_id in zip(corners, ids):
-                    mid = int(marker_id[0])
+                    mid = int(np.ravel(marker_id)[0])
                     cv2.polylines(frame, [corner.astype(np.int32)], True, (0, 255, 255), 3, cv2.LINE_AA)
                     pts = self.punti_per_id(mid)
                     if pts is None:

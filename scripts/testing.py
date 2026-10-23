@@ -83,14 +83,17 @@ def registra_fallito(sigma, seed, motivo=""):
                     "errore": "N/A", "x": "N/A", "y": "N/A", "yaw": "N/A"})
 
 # Funzione ausiliaria per controllare che non esista una riga nel file con un certo sigma/seed
-
 def riga_presente(sigma, seed):
     if not os.path.exists(CSV_OUT):
         return False
     with open(CSV_OUT, newline="") as f:
-        return any(riga["sigma"] == str(sigma) and riga["seed"] == str(seed)
-                   for riga in csv.DictReader(f))
-
+        for riga in csv.DictReader(f):
+            try: # è necessario convertire esplicitamente a float il contenuto di riga["sigma"] per evitare problemi di tipi
+                if float(riga["sigma"]) == float(sigma) and int(riga["seed"]) == int(seed):
+                    return True
+            except (ValueError, KeyError):
+                continue
+    return False
         
 
 for sigma in LIVELLI_SIGMA:

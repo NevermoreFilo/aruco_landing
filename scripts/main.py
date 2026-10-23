@@ -47,24 +47,30 @@ def heartbeat_loop():
         time.sleep(1)
 
 def missione():
+    print("Inizio missione")
     try:
-        while  not stream.flag_stream_attivo: # Prima che il drone si muova, attendo che lo stream sia partito
-            time.sleep(0.5) 
+        while not stream.flag_stream_attivo:
+            time.sleep(0.5)
         err_nord = random.gauss(0, args.sigma)
-        err_est = random.gauss(0, args.sigma)  
-        #stop.wait()
-        inizializzatore.movimento_drone()
+        err_est = random.gauss(0, args.sigma)
+
+        inizializzatore.avvio_drone()
+        aruco_lander.set_origine_coordinate()
         aruco_lander.set_gps_bias(err_nord, err_est, LAT_ERR)
         time.sleep(2)
+        inizializzatore.decollo_drone()
         aruco_lander.avvicinamento_zona_stazione()
         aruco_lander.fase_1()
         aruco_lander.fase_2()
         risultato.update(aruco_lander.fase_3())
+
+    except RuntimeError:
+        risultato["esito"] = None
     except Exception:
         traceback.print_exc()
         risultato["esito"] = "fallito"
     finally:
-        stop.set()          # chiude la finestra video a fine missione o in caso di errore
+        stop.set()
 
 threading.Thread(target=heartbeat_loop, daemon=True).start()
 threading.Thread(target=missione, daemon=True).start()
@@ -77,6 +83,8 @@ with open(args.output, "a", newline="",) as f:
         writer.writeheader() # se il file è nuovo scrivo la testa, altrimenti no
     if risultato.get("esito")  == "fallito":
         writer.writerow({"sigma":args.sigma, "seed":args.seed, "esito":"fallito", "errore":"N/A", "x":"N/A", "y":"N/A", "yaw":"N/A"}) #scrivo i risultati registrati nel dizionario, nel file csv 
+    elif risultato.get("esito") == None:
+        writer.writerow({"sigma":args.sigma, "seed":args.seed, "esito":"Errore nel lancio", "errore":"N/A", "x":"N/A", "y":"N/A", "yaw":"N/A"}) #scrivo i risultati registrati nel dizionario, nel file csv 
     else:
         writer.writerow({"sigma":args.sigma, "seed":args.seed, "esito":"ok", "errore":risultato["errore"], "x":risultato["x"], "y":risultato["y"], "yaw":risultato["yaw"]}) #scrivo i risultati registrati nel dizionario, nel file csv 
 
