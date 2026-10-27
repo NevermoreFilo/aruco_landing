@@ -9,20 +9,21 @@ import os
 
 class StreamVideo:
     def __init__(self):
-        self.pipeline = (
-            "udpsrc port=5600 caps=application/x-rtp,media=video,clock-rate=90000,encoding-name=H264 "
-            "! rtph264depay ! avdec_h264 ! videoconvert "
-            "! appsink name=appsink sync=false drop=true max-buffers=1"
-        )
+        # self.pipeline = ( # non più usata dopo il passaggio a FFMPEG
+        #     "udpsrc port=5600 caps=application/x-rtp,media=video,clock-rate=90000,encoding-name=H264 "
+        #     "! rtph264depay ! avdec_h264 ! videoconvert "
+        #     "! appsink name=appsink sync=false drop=true max-buffers=1"
+        # )
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
             "protocol_whitelist;file,udp,rtp|"
             "fflags;nobuffer|"
             "flags;low_delay|"
-            "analyzduration;0|"
+            "analyzeduration;0|"
             "threads;1|"
-            "max_delay;0"
+            "max_delay;0|"
+            "reorder_queue_size;0"
         )
-        self.sdp_path = "/tmp/stream.sdp"
+        self.sdp_path = "/tmp/stream.sdp" # necessario per usare FFMPEG
         sdp = (
             "v=0\n"
             "o=- 0 0 IN IP4 127.0.0.1\n"
@@ -33,6 +34,8 @@ class StreamVideo:
             "m=video 5600 RTP/AVP 96\n"
             "a=rtpmap:96 H264/90000\n"
         )
+        with open(self.sdp_path, "w") as f: # creo il file se non già presente
+            f.write(sdp)
         self.aruco_dict = cv2.aruco.getPredefinedDictionary( # dizionario dei marker
             cv2.aruco.DICT_4X4_50
         )

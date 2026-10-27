@@ -78,15 +78,15 @@ stream.avvio_streaming(stop)    # bloccante, nel thread principale (per via di i
 
 nuovo = not os.path.exists(args.output)
 with open(args.output, "a", newline="",) as f:
-    writer = csv.DictWriter(f, fieldnames=["sigma", "seed", "esito", "errore", "x", "y", "yaw"]) # testa del file csv
+    writer = csv.DictWriter(f, fieldnames=["sigma", "seed", "esito", "errore", "lat", "long", "yaw"]) # testa del file csv
     if nuovo:
         writer.writeheader() # se il file è nuovo scrivo la testa, altrimenti no
     if risultato.get("esito")  == "fallito":
-        writer.writerow({"sigma":args.sigma, "seed":args.seed, "esito":"fallito", "errore":"N/A", "x":"N/A", "y":"N/A", "yaw":"N/A"}) #scrivo i risultati registrati nel dizionario, nel file csv 
+        writer.writerow({"sigma":args.sigma, "seed":args.seed, "esito":"fallito", "errore":"N/A", "lat":"N/A", "long":"N/A", "yaw":"N/A"}) #scrivo i risultati registrati nel dizionario, nel file csv 
     elif risultato.get("esito") == None:
-        writer.writerow({"sigma":args.sigma, "seed":args.seed, "esito":"Errore nel lancio", "errore":"N/A", "x":"N/A", "y":"N/A", "yaw":"N/A"}) #scrivo i risultati registrati nel dizionario, nel file csv 
+        writer.writerow({"sigma":args.sigma, "seed":args.seed, "esito":"Errore nel lancio", "errore":"N/A", "lat":"N/A", "long":"N/A", "yaw":"N/A"}) #scrivo i risultati registrati nel dizionario, nel file csv 
     else:
-        writer.writerow({"sigma":args.sigma, "seed":args.seed, "esito":"ok", "errore":risultato["errore"], "x":risultato["x"], "y":risultato["y"], "yaw":risultato["yaw"]}) #scrivo i risultati registrati nel dizionario, nel file csv 
+        writer.writerow({"sigma":args.sigma, "seed":args.seed, "esito":"ok", "errore":risultato["errore"], "lat":risultato["lat"], "long":risultato["long"], "yaw":risultato["yaw"]}) #scrivo i risultati registrati nel dizionario, nel file csv 
 
 
 master.close()

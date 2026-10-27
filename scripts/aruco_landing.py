@@ -10,6 +10,7 @@ import threading
 import numpy as np
 from pymavlink import mavutil
 import time
+import geopy.distance
 
 import utils
 
@@ -20,8 +21,14 @@ class ArucoLanding:
 
 
         # Di quanto si scosta il primo marker rispetto la stazione
-        self.ox_dx = 0
-        self.ox_av = 1.5
+        self.OFFSET_STAZIONE_DESTRA = 0
+        self.OFFSET_STAZIONE_AVANTI = 1.5
+        self.OFFSET_MARKER_3 = {
+            5: np.array([0.3, 0.3, 0]),   # marker in alto a destra
+            6: np.array([ 0.3, -0.3, 0]),   # in basso a destra
+            7: np.array([-0.3, 0.3, 0]),   # in alto a sinistra
+            8: np.array([-0.3, -0.3, 0]),   # in basso a sinistra
+        }
 
         self.HFOV = 1.047 # letto dal .sdf
 
@@ -51,13 +58,13 @@ class ArucoLanding:
         self.VMAX_2 = 0.4 # m/s
         self.ANGOLO_CALIBRAZIONE_YAW_2 = 0  # angolo
         self.TOL_YAW_2 = np.radians(4) # tolleranza errore nello yaw
-        self.TOL_POS_2 = 0.2 # tolleranza nell'errore di x/y per la fase 2
+        self.TOL_POS_2 = 0.1 # tolleranza nell'errore di x/y per la fase 2, 10 cm
 
         self.KP_3 = 0.3 #m/s
         self.VMAX_3 = 0.3 # m/s
         self.ANGOLO_CALIBRAZIONE_YAW_3 = 0  # angolo
         self.TOL_YAW_3 = np.radians(2) # tolleranza errore nello yaw
-        self.TOL_POS_3 = 0.1 # tolleranza nell'errore di x/y per la fase 3
+        self.TOL_POS_3 = 0.02 # tolleranza nell'errore di x/y per la fase 3, 2 cm
 
         self.KP_YAW = 0.5        # velocità di correzzione (1/s)
         self.YAW_RATE_MAX = 0.8        # rad/s 
@@ -77,7 +84,7 @@ class ArucoLanding:
         t0 = time.time()
         while True:
             if(time.time()-t0) > 20:
-                raise RuntimeError
+                raise Exception
             d = self.stream.snapshot().get(0)
             if d is None or time.time() - d['t'] > 0.5:
                 self.allinea_drone(0,0,0)             # marker perso: fermo
@@ -87,8 +94,8 @@ class ArucoLanding:
             err_yaw = utils.wrap(d['angolo'] - self.ANGOLO_CALIBRAZIONE_YAW_1)                         
             tvec = d['tvec']
             # offset nel sistema marker: (ox_dx, ox_av) = (destra, avanti)
-            offset_destra = self.ox_dx
-            offset_avanti = self.ox_av
+            offset_destra = self.OFFSET_STAZIONE_DESTRA
+            offset_avanti = self.OFFSET_STAZIONE_AVANTI
             err_destra = tvec[0] - offset_destra
             err_avanti = -tvec[1] - offset_avanti
 
@@ -124,7 +131,7 @@ class ArucoLanding:
         print("Allineamento fase 2")
         while True:
             if(time.time()-t0) > 20:
-                raise RuntimeError
+                raise Exception
             snap = self.stream.snapshot()
             ora = time.time()
             if not all(i in snap and ora - snap[i]['t'] < 0.5 for i in ids):
@@ -171,16 +178,36 @@ class ArucoLanding:
         ids = self.ID_ATTESI_3
         print("Allineamento fase 3")
         while True:
-            if(time.time()-t0) > 20:
-                raise RuntimeError
+            if(time.time()-t0) > 60:
+                raise Exception
             
             snap = self.stream.snapshot()
             ora = time.time()
-            if not all(i in snap and ora - snap[i]['t'] < 0.5 for i in ids):
-                self.allinea_drone(0,0,0)             # marker perso: fermo
-                time.sleep(0.1)
-                continue
+            if not all(i in snap and ora - snap[i]['t'] < 0.5 for i in ids): # marker perso: failsafe
+                #self.allinea_drone(0,0,0)            
+                #time.sleep(0.1)
+                disponibili = [i for i in ids if i in snap and ora - snap[i]['t']<0.5] # prendo gli id disponibili
+                if len(disponibili)==0: # singoli casi
+                        self.allinea_drone(0, 0, 0)   # nessun marker: fermo
+                        time.sleep(0.1)
+                        continue
+                if len(disponibili) < 4: # failsafe
+                    destra_lista = []
+                    avanti_lista = []
+                    for i in disponibili:
+                        tx, ty, _ = snap[i]['tvec']
+                        odx, oav, _ = self.OFFSET_MARKER_3[i]
+                        destra_lista.append(tx - odx)
+                        avanti_lista.append(-ty - oav) # la y della camera cresce verso il basso
 
+                    err_destra = float(np.mean(destra_lista))
+                    err_avanti = float(np.mean(avanti_lista))
+                    vx = np.clip(self.KP_3 * err_avanti, -self.VMAX_3, self.VMAX_3)
+                    vy = np.clip(self.KP_3 * err_destra, -self.VMAX_3, self.VMAX_3)
+                    self.allinea_drone(vx, vy, 0)   # lo yaw non lo correggo perché richiederebbe vari casi a se stanti
+                    time.sleep(0.1)
+                    continue
+            # Caso base/ideale: vedo tutti i marker
             p = {i: np.array(snap[i]['tvec']) for i in ids}   
             cx, cy, cz = np.mean([p[i] for i in ids], axis=0) # centro stimato
             # Coppia parallela
@@ -195,13 +222,21 @@ class ArucoLanding:
                 atterrato = self.atterraggio_drone()
                 if (not atterrato):
                     return(dict(esito="fallito"))
-                x,y = utils.posizione_reale_gazebo() # @TODO: cambiare con posizione globale questo calcolo, poi runnare i test
+                    
+                x,y,z = utils.posizione_reale_gazebo() #prendo la posizione in NED e la cambio per averla in coordinate globali
+                lat, long, _ = pm.ned2geodetic(
+                    y, x, -z, # conversione ENU -> NED
+                    self.coordinate_origine[0], self.coordinate_origine[1], self.coordinate_origine[2]
+                )
                 yaw = self.stato['ATTITUDE'].yaw
-                errore = math.hypot(x-self.COORDINATE_ESATTE_STAZIONE[1], y-self.COORDINATE_ESATTE_STAZIONE[0])
-                print("Atterraggio avvenuto alle coordinate x: ", x, " y: ", y, " e con yaw: ", yaw)
+                errore = geopy.distance.geodesic(
+                    (lat, long),
+                    (self.coordinate_globali_stazione[0], self.coordinate_globali_stazione[1])
+                ).meters
+                print("Atterraggio avvenuto alle coordinate lat: ", lat, " long: ", long, " e con yaw: ", yaw)
                 print("Errore nell'atterraggio: ", errore)
                 print("Fase 3 completata")
-                return dict(esito="ok", errore=errore, x=x, y=y, yaw=yaw)
+                return dict(esito="ok", errore=errore, lat=lat, long=long, yaw=yaw)
             else :
                 vx = np.clip(self.KP_3 * err_avanti, -self.VMAX_3, self.VMAX_3)
                 vy = np.clip(self.KP_3 * err_destra, -self.VMAX_3, self.VMAX_3)
@@ -342,7 +377,7 @@ class ArucoLanding:
     def set_gps_bias(self, err_n_m, err_e_m, lat_deg):
         dlat = err_n_m / 111_000.0
         dlon = err_e_m / (111_000.0 * math.cos(math.radians(lat_deg)))
-        self.set_param('SIM_GPS1_GLTCH_X', dlat)   # o SIM_GPS_GLITCH_X nelle versioni vecchie
+        self.set_param('SIM_GPS1_GLTCH_X', dlat)   
         self.set_param('SIM_GPS1_GLTCH_Y', dlon)
 
     # Funzione che imposta l'origine delle coordinate globali alla posizione di partenza del drone

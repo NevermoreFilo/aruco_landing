@@ -8,7 +8,7 @@ import csv
 
 ARDUPILOT_DIR = os.path.expanduser("~/ardupilot/Tools/autotest")   # adatta
 LIVELLI_SIGMA = [0, 0.5, 1, 2, 3]
-RIPETIZIONI = 10
+RIPETIZIONI = 20
 CSV_OUT = "risultati.csv"
 CAMPI = ["sigma", "seed", "esito", "errore", "x", "y", "yaw"]
 PARAMETRI_CAMERA = os.path.expanduser("~/gz_ws/src/ardupilot_gazebo/config/gazebo-iris-gimbal.parm")
