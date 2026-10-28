@@ -34,11 +34,6 @@ class ArucoLanding:
 
         # Costanti 
 
-        #self.COORDINATE_ESATTE_STAZIONE = [7, 15] # Mantengo le esatte coordinate della stazione per confrontarle con quelle ottenute all'atterraggio
-        # coordinate (grossolane) della zona della stazione di atterraggio (in metri)
-        #self.ZONA_STAZIONE = [random.randrange(1, 15, 1), random.randrange(5, 20), -15] # la z viene messa a 15 metri 
-        # Nota: le coordinate in Gazebo usano il sistema di riferimento NED (North-East-Down), mentre MAVLink usa il sistema di riferimento ENU (East-North-Up)
-        
         self.ZONA_STAZIONE = [stazione[0], stazione[1], -15]
 
         self.COORDINATE_ESATTE_STAZIONE = stazione
@@ -57,17 +52,20 @@ class ArucoLanding:
         self.KP_2 = 0.4 #m/s
         self.VMAX_2 = 0.4 # m/s
         self.ANGOLO_CALIBRAZIONE_YAW_2 = 0  # angolo
-        self.TOL_YAW_2 = np.radians(4) # tolleranza errore nello yaw
+        self.TOL_YAW_2 = np.radians(5) # tolleranza errore nello yaw
         self.TOL_POS_2 = 0.1 # tolleranza nell'errore di x/y per la fase 2, 10 cm
 
         self.KP_3 = 0.3 #m/s
         self.VMAX_3 = 0.3 # m/s
         self.ANGOLO_CALIBRAZIONE_YAW_3 = 0  # angolo
-        self.TOL_YAW_3 = np.radians(2) # tolleranza errore nello yaw
+        self.TOL_YAW_3 = np.radians(3) # tolleranza errore nello yaw
         self.TOL_POS_3 = 0.02 # tolleranza nell'errore di x/y per la fase 3, 2 cm
 
         self.KP_YAW = 0.5        # velocità di correzzione (1/s)
         self.YAW_RATE_MAX = 0.8        # rad/s 
+
+        self.FRAME_FASE2 = 5
+        self.FRAME_FASE3 = 10 # numero di frame in cui il drone deve rispettare l'allineamento (essere dentro le soglie)
 
         # Variabili globali
         self.coordinate_globali_stazione = [0,0,0]
@@ -83,7 +81,7 @@ class ArucoLanding:
         print("Allineamento fase 1")
         t0 = time.time()
         while True:
-            if(time.time()-t0) > 20:
+            if(time.time()-t0) > 60:
                 raise Exception
             d = self.stream.snapshot().get(0)
             if d is None or time.time() - d['t'] > 0.5:
@@ -125,12 +123,13 @@ class ArucoLanding:
 
     # Funzione per la gestione della fase 2: allineamento più preciso ed ultima discesa di quota prima dell'atterraggio
     def fase_2(self):
+        contatore_frame = 0
         t0=time.time()
         self.set_param('LAND_SPEED', 50)   # cm/s
         ids = self.ID_ATTESI_2
         print("Allineamento fase 2")
         while True:
-            if(time.time()-t0) > 20:
+            if(time.time()-t0) > 60:
                 raise Exception
             snap = self.stream.snapshot()
             ora = time.time()
@@ -150,12 +149,19 @@ class ArucoLanding:
 
             # se tutti i parametri sono nella soglia di tolleranza, sono allineato
             if abs (err_avanti) < self.TOL_POS_2 and abs(err_destra) < self.TOL_POS_2 and abs(err_yaw) < self.TOL_YAW_2:
-                print("Secondo allineamento completato, discesa...")
-                self.discesa_drone(-0.7)                    # scendo a 0.7m per la fase 3
-                self.attendi_quota(-0.7)
-                print("Fase 2 completata")
-                return
-            else :
+                if contatore_frame >= self.FRAME_FASE2:
+                    print("Secondo allineamento completato, discesa...")
+                    self.discesa_drone(-0.7)                    # scendo a 0.7m per la fase 3
+                    self.attendi_quota(-0.7)
+                    print("Fase 2 completata")
+                    return
+                else: # frame insufficienti
+                    contatore_frame += 1
+                    self.allinea_drone(0, 0, 0)   # nessun marker: fermo
+                    time.sleep(0.1)
+                    continue
+            else:
+                contatore_frame = 0
                 vx = np.clip(self.KP_2 * err_avanti, -self.VMAX_2, self.VMAX_2)
                 vy = np.clip(self.KP_2 * err_destra, -self.VMAX_2, self.VMAX_2)
                 yaw_rate = np.clip(self.KP_YAW * err_yaw, -self.YAW_RATE_MAX, self.YAW_RATE_MAX)
@@ -172,6 +178,7 @@ class ArucoLanding:
 
     # Funzione per la gestione della fase 3: allineamento finale ed atterraggio
     def fase_3(self):
+        contatore_frame = 0
         t0=time.time()
         self.set_param('LAND_SPEED', 10)   # cm/s
         time.sleep(2)
@@ -218,26 +225,33 @@ class ArucoLanding:
 
             # se tutti i parametri sono nella soglia di tolleranza, sono allineato
             if abs (err_avanti) < self.TOL_POS_3 and abs(err_destra) < self.TOL_POS_3 and abs(err_yaw) < self.TOL_YAW_3:
-                print("Terzo allineamento completato, atterraggio...")
-                atterrato = self.atterraggio_drone()
-                if (not atterrato):
-                    return(dict(esito="fallito"))
-                    
-                x,y,z = utils.posizione_reale_gazebo() #prendo la posizione in NED e la cambio per averla in coordinate globali
-                lat, long, _ = pm.ned2geodetic(
-                    y, x, -z, # conversione ENU -> NED
-                    self.coordinate_origine[0], self.coordinate_origine[1], self.coordinate_origine[2]
-                )
-                yaw = self.stato['ATTITUDE'].yaw
-                errore = geopy.distance.geodesic(
-                    (lat, long),
-                    (self.coordinate_globali_stazione[0], self.coordinate_globali_stazione[1])
-                ).meters
-                print("Atterraggio avvenuto alle coordinate lat: ", lat, " long: ", long, " e con yaw: ", yaw)
-                print("Errore nell'atterraggio: ", errore)
-                print("Fase 3 completata")
-                return dict(esito="ok", errore=errore, lat=lat, long=long, yaw=yaw)
+                if contatore_frame < self.FRAME_FASE3:
+                    contatore_frame += 1
+                    self.allinea_drone(0, 0, 0)   # nessun marker: fermo
+                    time.sleep(0.1)
+                    continue
+                else: 
+                    print("Terzo allineamento completato, atterraggio...")
+                    atterrato = self.atterraggio_drone()
+                    if (not atterrato):
+                        return(dict(esito="fallito"))
+                        
+                    x,y,z = utils.posizione_reale_gazebo() #prendo la posizione in NED e la cambio per averla in coordinate globali
+                    lat, long, _ = pm.ned2geodetic(
+                        y, x, -z, # conversione ENU -> NED
+                        self.coordinate_origine[0], self.coordinate_origine[1], self.coordinate_origine[2]
+                    )
+                    yaw = self.stato['ATTITUDE'].yaw
+                    errore = geopy.distance.geodesic(
+                        (lat, long),
+                        (self.coordinate_globali_stazione[0], self.coordinate_globali_stazione[1])
+                    ).meters
+                    print("Atterraggio avvenuto alle coordinate lat: ", lat, " long: ", long, " e con yaw: ", yaw)
+                    print("Errore nell'atterraggio: ", errore)
+                    print("Fase 3 completata")
+                    return dict(esito="ok", errore=errore, lat=lat, long=long, yaw=yaw)
             else :
+                contatore_frame = 0
                 vx = np.clip(self.KP_3 * err_avanti, -self.VMAX_3, self.VMAX_3)
                 vy = np.clip(self.KP_3 * err_destra, -self.VMAX_3, self.VMAX_3)
                 yaw_rate = np.clip(self.KP_YAW * err_yaw, -self.YAW_RATE_MAX, self.YAW_RATE_MAX)
